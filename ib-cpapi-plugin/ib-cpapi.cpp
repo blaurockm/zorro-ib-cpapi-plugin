@@ -30,7 +30,7 @@ struct GLOBAL {
 	char Url[256]; // send URL buffer
 	char Key[256], Secret[256]; // credentials
 	char Symbol[64], Uuid[256]; // last trade, symbol and Uuid
-	char AccountId[16]; // account currency
+	char AccountId[16]; // account-identifier
 } G; // parameter singleton
 
 struct ib_asset {
@@ -59,41 +59,50 @@ int sleep(int ms)
 	return BrokerProgress(0);
 }
 
+DATE convertTime2DATE(__time32_t t32)
+{
+	return (double)t32 / (24. * 60. * 60.) + 25569.; // 25569. = DATE(1.1.1970 00:00)
+}
+
+__time32_t convertDATE2Time(DATE date)
+{
+	return (__time32_t)((date - 25569.) * 24. * 60. * 60.);
+}
 /**
  simple send method with error handling.
  chan is for selecting the max return buffer size., must be (1,0) or 2
 */
-char* send(const char* suburl, int chan = 0, const char* meth = NULL, const char* bod = NULL)
+struct json_object *send(const char* suburl, const char* bod = NULL)
 {
 	// a place for the final url and the respone from the server
-	static char Url[1024], Buffer1[1024 * 2024], Buffer2[8192], Header[2048];
+	static char url[1024], resp[1024 * 2024], header[2048];
 	// wait 30 seconds for the server to reply
 	int size = 0, wait = 3000;
-	sprintf_s(Url, "%s%s", BASEURL, suburl);
-	strcpy_s(Header, "Content-Type: application/json\n");
-	strcpy_s(Header, "User-Agent: Console\n"); // without this we get 403
+	sprintf_s(url, "%s%s", BASEURL, suburl);
+	strcpy_s(header, "Content-Type: application/json\n");
+	strcpy_s(header, "User-Agent: Console\n"); // without this we get 403
 	// if we add accept-Type then we cannot POST json-body i
-	char* resp = chan & 2 ? Buffer2 : Buffer1;
-	int maxSize = chan & 2 ? sizeof(Buffer2) : sizeof(Buffer1);
-	int reqId = http_request(Url, bod, Header, meth);
+	int reqId = http_request(url, bod, header, (bod ? "POST" : NULL));
 	if (!reqId) 
 		goto send_error;
 	while (!(size = http_status(reqId)) && --wait > 0) {
 		if (!sleep(10)) goto send_error;
 	}
 	if (!size) goto send_error;
-	if (!http_result(reqId, resp, maxSize)) goto send_error;
-	resp[maxSize - 1] = 0; // prevent buffer overrun
+	if (!http_result(reqId, resp, sizeof(resp))) goto send_error;
+	resp[sizeof(resp) - 1] = 0; // prevent buffer overrun
 	http_free(reqId);
-	return resp;
+	if (strlen(resp) < 5 || !strncmp(resp, "ERROR", 5)) {
+		showMsg("error with request ", strcatf(resp, suburl));
+		return NULL;
+	}
+	return json_tokener_parse(resp);
 		
 send_error:
 	if (reqId) http_free(reqId);
 	return NULL;
 }
 
-static char gSymbol[256] = "";	// by SET_SYMBOL
-static int gOrderType = 0;	// last order type, FOK/GTC
 static int gAmount = 1;	// last order amount
 
 // Global vars ///////////////////////////////////////////////////////////
@@ -114,17 +123,14 @@ DLLFUNC int BrokerOpen(char* Name, FARPROC fpMessage, FARPROC fpProgress) {
 DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 {
 	if (User) {
-		char *resp = send("/iserver/accounts");
-		// parsing the request
-		struct json_object *jreq = json_tokener_parse(resp);
+		struct json_object* jreq = send("/iserver/accounts");
 		if (!jreq) {
-			showMsg("error connecing: ", resp);
 			return 0;
 		}
 		struct json_object* selAcc = json_object_object_get(jreq, "selectedAccount");
 		memset(&G, 0, sizeof(G));
-		strcpy_s(G.Key, json_object_get_string(selAcc));
-		showMsg("ClientPortal-API connected to ", G.Key);
+		strcpy_s(G.AccountId, json_object_get_string(selAcc));
+		showMsg("ClientPortal-API connected to ", G.AccountId);
 		json_object_put(jreq);
 		return 1;
 	}
@@ -192,21 +198,19 @@ struct ib_asset* searchContractIdForSymbol(char* ext_symbol)
 		showMsg("serious malloc failure, have to exit Zorro");
 		exit(errno);
 	}
+	strcpy(res->symbol, ext_symbol); // our key for the hashmap
+	res->contract_id = 0; // marker if found
+
 	// TODO: split extended symbol
 	const char * root = "XAUUSD";
 	const char * type = "CFD";
 	sprintf_s(suburl, "/iserver/secdef/search?symbol=%s", root);
 
-	strcpy(res->symbol, ext_symbol); // our key for the hashmap
-	res->contract_id = 0; // marker if found
-
 	// we get a lot of json back.
-	char* resp = send(suburl, 1);
 
-	struct json_object* jreq = json_tokener_parse(resp);
+	struct json_object* jreq = send(suburl);
 	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
 		json_object_put(jreq);
-		showMsg("error searching contract: ", resp);
 		return NULL;
 	}
 
@@ -290,20 +294,16 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 	double* pVolume, double* pPip, double* pPipCost, double* pMinAmount,
 	double* pMarginCost, double* pRollLong, double* pRollShort)
 {
-	char suburl[1024];
 	int conId = getContractIdForSymbol(symb);
 	if (conId <= 0) {
 		showMsg("symbol not found within IB : ", symb);
 		return 0;
 	}
-	sprintf_s(suburl, "/iserver/marketdata/snapshot?conids=%d&fields=31,55,86,84", conId);
+	char* suburl = strf("/iserver/marketdata/snapshot?conids=%d&fields=31,55,86,84", conId);
 
-	char* resp = send(suburl,1);
-
-	struct json_object* jreq = json_tokener_parse(resp);
+	struct json_object* jreq = send(suburl);
 	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
 		json_object_put(jreq);
-		showMsg("error getting market data: ", resp);
 		return 0;
 	}
 	struct json_object* arrElem = json_object_array_get_idx(jreq, 0);
@@ -330,13 +330,12 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 
 DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, double* pPrice, int* pFill)
 {
-	char suburl[1024];
 	int conId = getContractIdForSymbol(symb);
 	if (conId <= 0) {
 		showMsg("symbol not found within IB : ", symb);
 		return 0;
 	}
-	sprintf_s(suburl, "/iserver/account/%s/orders", G.Key); // the account we selected during login
+	char *suburl = strf("/iserver/account/%s/orders", G.AccountId); 
 
 	// check ordertype which is set by SET_ORDERTYPE
 	// ordertype is known as tif  with IB
@@ -361,29 +360,24 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, doubl
 
 	// showMsg("buy request: ", json_object_to_json_string(jord));
 
-	char* resp = send(suburl, 1, "POST", json_object_to_json_string(jord));
+	struct json_object* jreq = send(suburl, json_object_to_json_string(jord));
 	json_object_put(jord);
 
 	// showMsg("buy response: ", resp);
 
 	// do we get a question back??
-	struct json_object* jreq = json_tokener_parse(resp);
 	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
-		json_object_put(jreq);
-		showMsg("error posting order ", resp);
 		return 0;
 	}
 
 	// question-answer-loop
 	struct json_object* reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
 	while (reply_id_obj) {
-		sprintf_s(suburl, "/iserver/reply/%s", json_object_get_string(reply_id_obj));
+		char *suburl = strf("/iserver/reply/%s", json_object_get_string(reply_id_obj));
 		json_object_put(jreq); // free the old reply-question
-		resp = send(suburl, 1, "POST", "{\"confirmed\":true}");
-		jreq = json_tokener_parse(resp);
+		jreq = send(suburl, "{\"confirmed\":true}");
 		if (!jreq || !json_object_is_type(jreq, json_type_array)) {
 			json_object_put(jreq);
-			showMsg("error replying to question ", resp);
 			return 0;
 		}
 		reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
@@ -393,7 +387,6 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, doubl
 	// sanity-check to be shure
 	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
 		json_object_put(jreq);
-		showMsg("error order  ", resp);
 		return 0;
 	}
 	struct json_object* first_reply = json_object_array_get_idx(jreq, 0);
@@ -409,15 +402,10 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, doubl
 
 DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double* pdMarginVal)
 {
-	char suburl[1024];
-	sprintf_s(suburl, "/portfolio/%s/ledger", g ? g : G.Key); // the account we selected during login or the given one
+	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.AccountId); // the account we selected during login or the given one
 
-	char* resp = send(suburl, 1);
-
-	struct json_object* jreq = json_tokener_parse(resp);
+	struct json_object* jreq = send(suburl); 
 	if (!jreq) {
-		json_object_put(jreq);
-		showMsg("error getting account ledger: ", resp);
 		return 0;
 	}
 	struct json_object* baseLedger = json_object_object_get(jreq, "BASE");
@@ -426,14 +414,14 @@ DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double
 	struct json_object* balance = json_object_object_get(baseLedger, "cashbalance");
 	if (!balance) {
 		json_object_put(jreq);
-		showMsg("no balance in response", resp);
+		showMsg("no balance in response", suburl);
 		return 0;
 	}
 	double bal = json_object_get_double(balance);
 	struct json_object* networth = json_object_object_get(baseLedger, "netliquidationvalue");
 	if (!networth) {
 		json_object_put(jreq);
-		showMsg("no networth in response", resp);
+		showMsg("no networth in response", suburl);
 		return 0;
 	}
 	double net = json_object_get_double(networth);
@@ -446,19 +434,48 @@ DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double
 }
 
 
-DLLFUNC int BrokerHistory2(char* ass, DATE tStart, DATE tEnd, int nTickMinutes, int nTicks, T6* ticks)
+DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes, int nTicks, T6* ticks)
 {
-	for (int i = 0; i < nTicks; i++) {
-		ticks->fOpen = 1.01F;
-		ticks->fClose = 1.02F;
-		ticks->fHigh = 1.0005 * max(ticks->fOpen, ticks->fClose);
-		ticks->fLow = 0.9995 * min(ticks->fOpen, ticks->fClose);
-		ticks->time = tEnd - i * nTickMinutes / 1440.;
+	int conId = getContractIdForSymbol(symb);
+	if (conId <= 0) {
+		showMsg("symbol not found within IB : ", symb);
+		return 0;
+	}
+	char barParam[15];
+	char durParam[15];
+	if (nTickMinutes <= 30) {  // less then half an hour per tick
+		sprintf(barParam, "%dmin", nTickMinutes);
+		sprintf(durParam, "%dh", (nTickMinutes * nTicks) / 60 ); // we need hours
+	} else if (nTickMinutes <= 1440) { // less then a day per tick
+		sprintf(barParam, "%dh", nTickMinutes / 60);  // we need hours
+		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / 60 / 24); // we need days
+	}
+	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s", conId, barParam, durParam); // the account we selected during login or the given one
+	struct json_object* jreq = send(suburl);
+	if (!jreq) {
+		return 0;
+	}
+	struct json_object* data_arr = json_object_object_get(jreq, "data");
+	printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(data_arr, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
+
+	for (int i = json_object_array_length(data_arr)-1; i>=0 ; i--)
+	{
+		struct json_object* data = json_object_array_get_idx(data_arr, i); 
+
+		ticks->fOpen = json_object_get_double(json_object_object_get(data,"o"));
+		ticks->fClose = json_object_get_double(json_object_object_get(data, "c"));
+		ticks->fHigh = json_object_get_double(json_object_object_get(data, "h")); 
+		ticks->fLow = json_object_get_double(json_object_object_get(data, "l")); 
+		printf(strf("%llu  -> %f\n", json_object_get_int64(json_object_object_get(data, "t")),
+			convertTime2DATE((__time32_t)json_object_get_int64(json_object_object_get(data, "t")))
+			));
+		ticks->time = convertTime2DATE((__time32_t)json_object_get_int64(json_object_object_get(data, "t")));
 		ticks++;
 	}
-	return nTicks;
+	int points = json_object_get_int(json_object_object_get(jreq, "points"));
+	json_object_put(jreq);
+	return points;
 }
-
 
 
 #ifdef BROKERTRADE
@@ -471,13 +488,24 @@ DLLFUNC int BrokerTrade(int nTradeID, double* pOpen, double* pClose, double* pCo
 }
 #endif
 
+/**
+* ask the broker for all trades from the given account.
+* fills them to the given array
+*/
+int getTrades(TRADE* trades)
+{
+	return 0;
+}
+
+
 DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 {
 	switch (command) {
-	case GET_COMPLIANCE: return 2.;
-	case GET_MAXREQUESTS: return 30.;
-	case SET_ORDERTYPE: return gOrderType = parameter;
-	case SET_SYMBOL: strcpy_s(gSymbol, (char*)parameter); return 1.;
+	case GET_COMPLIANCE: return 2.; // no hedging
+	case GET_MAXREQUESTS: return 10.; // max 10 req/s
+	case SET_ORDERTYPE: return G.OrderType = parameter;
+	case SET_SYMBOL: strcpy_s(G.Symbol, (char*)parameter); return 1.;
+	case GET_TRADES: return getTrades((TRADE*) parameter);
 	}
 	return 0.;
 }

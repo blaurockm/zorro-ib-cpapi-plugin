@@ -22,10 +22,14 @@ than 5 assets with minute-bar-data.
 for now you have to use Visual Studio, community edition is ok.
 You have to have a Zorro installation because of the header files and ZorroDLL.cpp
 
+you need vcpkg - manager: json-c package is statically linked to the plugin
+
+vcpkg install json-c:x86-windows-static
+
 
 ## Links
 
 * [Zorro Project](www.zorro-project.org)
 * [IB-Plugin](https://www.interactivebrokers.com/en/trading/ib-api.php)
-* 
+* [IB-Campus for API](https://ibkrcampus.com/ibkr-api-page/cpapi/)
 
