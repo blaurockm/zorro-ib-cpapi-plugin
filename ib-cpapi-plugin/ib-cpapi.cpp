@@ -447,6 +447,7 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		showMsg("symbol not found within IB : ", symb);
 		return 0;
 	}
+	showMsg("history2: ", strf("%s - %s\n", strdate(YMDHMS, tStart), strdate("%Y%m%d %H:%M:%S", tEnd)));
 	char barParam[15];
 	char durParam[15];
 	if (nTickMinutes <= 30) {  // less then half an hour per tick
@@ -456,7 +457,8 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		sprintf(barParam, "%dh", nTickMinutes / 60);  // we need hours
 		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / 60 / 24); // we need days
 	}
-	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s", conId, barParam, durParam); // the account we selected during login or the given one
+	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s", 
+		conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd));
 	struct json_object* jreq = send(suburl);
 	if (!jreq) {
 		return 0;
@@ -468,16 +470,16 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 	{
 		struct json_object* data = json_object_array_get_idx(data_arr, i); 
 
-		ticks->fOpen = json_object_get_double(json_object_object_get(data,"o"));
-		ticks->fClose = json_object_get_double(json_object_object_get(data, "c"));
-		ticks->fHigh = json_object_get_double(json_object_object_get(data, "h")); 
-		ticks->fLow = json_object_get_double(json_object_object_get(data, "l")); 
+		ticks->fOpen = (float) json_object_get_double(json_object_object_get(data,"o"));
+		ticks->fClose = (float) json_object_get_double(json_object_object_get(data, "c"));
+		ticks->fHigh = (float) json_object_get_double(json_object_object_get(data, "h")); 
+		ticks->fLow = (float) json_object_get_double(json_object_object_get(data, "l")); 
 		const time_t val = json_object_get_int64(json_object_object_get(data, "t"));
 		const time_t val2 = val / 1000ull;
-		printf(strf("%llu -> %f, %s", val,
-			convertEpoch2DATE(val),
-			ctime(&val2)
-			));
+//		printf(strf("%llu -> %f, %s", val,
+//			convertEpoch2DATE(val),
+//			ctime(&val2)
+//			));
 		ticks->time = convertEpoch2DATE(val);
 		ticks++;
 	}
