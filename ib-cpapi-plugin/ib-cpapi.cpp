@@ -7,6 +7,7 @@ typedef double DATE;
 #include <trading.h>
 #include <stdio.h>
 #include <zorro.h>
+#include <time.h> // for uman readable epoch time
 
 #include "json-c/json.h"
 #include "uthash.h"
@@ -62,6 +63,11 @@ int sleep(int ms)
 DATE convertTime2DATE(__time32_t t32)
 {
 	return (double)t32 / (24. * 60. * 60.) + 25569.; // 25569. = DATE(1.1.1970 00:00)
+}
+
+DATE convertEpoch2DATE(long long t32)
+{
+	return (double)t32 / (24. * 60. * 60. * 1000.) + 25569.; // 25569. = DATE(1.1.1970 00:00)
 }
 
 __time32_t convertDATE2Time(DATE date)
@@ -456,7 +462,7 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		return 0;
 	}
 	struct json_object* data_arr = json_object_object_get(jreq, "data");
-	printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(data_arr, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
+	//printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(data_arr, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
 
 	for (int i = json_object_array_length(data_arr)-1; i>=0 ; i--)
 	{
@@ -466,10 +472,13 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		ticks->fClose = json_object_get_double(json_object_object_get(data, "c"));
 		ticks->fHigh = json_object_get_double(json_object_object_get(data, "h")); 
 		ticks->fLow = json_object_get_double(json_object_object_get(data, "l")); 
-		printf(strf("%llu  -> %f\n", json_object_get_int64(json_object_object_get(data, "t")),
-			convertTime2DATE((__time32_t)json_object_get_int64(json_object_object_get(data, "t")))
+		const time_t val = json_object_get_int64(json_object_object_get(data, "t"));
+		const time_t val2 = val / 1000ull;
+		printf(strf("%llu -> %f, %s", val,
+			convertEpoch2DATE(val),
+			ctime(&val2)
 			));
-		ticks->time = convertTime2DATE((__time32_t)json_object_get_int64(json_object_object_get(data, "t")));
+		ticks->time = convertEpoch2DATE(val);
 		ticks++;
 	}
 	int points = json_object_get_int(json_object_object_get(jreq, "points"));
