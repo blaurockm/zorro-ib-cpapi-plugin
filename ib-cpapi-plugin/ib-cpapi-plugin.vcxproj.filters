@@ -26,5 +26,8 @@
     <ClInclude Include="uthash.h">
       <Filter>Headerdateien</Filter>
     </ClInclude>
+    <ClInclude Include="ib-cpapi.h">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

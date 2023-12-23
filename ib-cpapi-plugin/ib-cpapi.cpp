@@ -11,6 +11,7 @@ typedef double DATE;
 
 #include "json-c/json.h"
 #include "uthash.h"
+#include "ib-cpapi.h"
 
 #define PLUGIN_TYPE 2
 #define PLUGIN_NAME "IB ClientPortal API"
@@ -25,13 +26,14 @@ int(__cdecl* BrokerProgress)(const int Progress);
 
 struct GLOBAL {
 	int Diag;
-	int HttpId;
 	int PriceType, VolType, OrderType;
 	double Unit;
 	char Url[256]; // send URL buffer
 	char Key[256], Secret[256]; // credentials
 	char Symbol[64], Uuid[256]; // last trade, symbol and Uuid
 	char AccountId[16]; // account-identifier
+	int loggedIn;
+	int WaitTime; // time in ms
 } G; // parameter singleton
 
 struct ib_asset {
@@ -78,7 +80,7 @@ __time32_t convertDATE2Time(DATE date)
  simple send method with error handling.
  chan is for selecting the max return buffer size., must be (1,0) or 2
 */
-struct json_object *send(const char* suburl, const char* bod = NULL)
+struct json_object* send(const char* suburl, const char* bod = NULL, const char* meth = NULL)
 {
 	// a place for the final url and the respone from the server
 	static char url[1024], resp[1024 * 2024], header[2048];
@@ -87,10 +89,13 @@ struct json_object *send(const char* suburl, const char* bod = NULL)
 	sprintf_s(url, "%s%s", BASEURL, suburl);
 	strcpy_s(header, "Content-Type: application/json\n");
 	strcpy_s(header, "User-Agent: Console\n"); // without this we get 403
-	// if we add accept-Type then we cannot POST json-body i
-	int reqId = http_request(url, bod, header, (bod ? "POST" : NULL));
-	if (!reqId) 
+	// if we add accept-Type then we cannot POST json-body 
+	// method is only used when body is given. otherwise its always GET
+	int reqId = http_request(url, bod, header, (bod ? (meth ? meth :  "POST") : NULL));
+	if (!reqId) {
+		G.loggedIn = 0; // no connection to our gateway
 		goto send_error;
+	}
 	while (!(size = http_status(reqId)) && --wait > 0) {
 		if (!sleep(10)) goto send_error;
 	}
@@ -109,14 +114,15 @@ send_error:
 	return NULL;
 }
 
-static int gAmount = 1;	// last order amount
-
-// Global vars ///////////////////////////////////////////////////////////
-
+/*
+*  initilize our plugin. when it is loaded by zorro
+*/
 DLLFUNC int BrokerOpen(char* Name, FARPROC fpMessage, FARPROC fpProgress) {
 	strcpy_s(Name, 32, PLUGIN_NAME);
 	(FARPROC&)BrokerMessage = fpMessage;
 	(FARPROC&)BrokerProgress = fpProgress;
+	// erase everything in our global storage
+	memset(&G, 0, sizeof(G));
 	// we could make an unsubscribe to marketdata here, but this wouzld kill all other running zorros..
 	return PLUGIN_TYPE;
 }
@@ -134,9 +140,10 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 			return 0;
 		}
 		struct json_object* selAcc = json_object_object_get(jreq, "selectedAccount");
-		memset(&G, 0, sizeof(G));
 		strcpy_s(G.AccountId, json_object_get_string(selAcc));
 		showMsg("ClientPortal-API connected to ", G.AccountId);
+		G.loggedIn = 2; // see BrokerTime
+		G.WaitTime = 60000; // default Wait Time for Orders (SET_WAIT)
 		json_object_put(jreq);
 		return 1;
 	}
@@ -147,29 +154,14 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 *  check Connection to ClientPortal
 *  0 = Lost, 1 = market closed, 2 = ok and market open
 * -> market time depends on Asset!?
-* 
-*
+*  
+* for now: only check if we have a connection to our gateway.
+* no extra checking for time
+*/
 DLLFUNC int BrokerTime(DATE* pTimeGMT)
 {
-	char* resp = send("/tickle");
-	// parsing the request
-	struct json_object* jreq = json_tokener_parse(resp);
-	if (!jreq) {
-		showMsg("error connecing: ", resp);
-		return 0;
-	}
-	struct json_object* iserver = json_object_object_get(jreq, "iserver");
-	struct json_object* authStatus = json_object_object_get(iserver, "authStatus");
-	struct json_object* connected = json_object_object_get(authStatus, "connected");
-	BOOL conn = json_object_get_boolean(connected);
-	json_object_put(jreq);
-	if (!conn) {
-		showMsg("conection lost");
-		return 0;
-	}
-	return 2;	// broker is online
+	return G.loggedIn;
 }
-*/
 
 /*
 *  security search by (extended-)symbol
@@ -332,9 +324,60 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 	return 1;
 }
 
+json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist)
+{
+	json_object* jord = json_object_new_object();
+	json_object* jord_arr = json_object_new_array();
 
+	json_object* order = json_object_new_object();
 
-DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, double* pPrice, int* pFill)
+	json_object_object_add(order, "conid", json_object_new_int(conId));
+	// check ordertype which is set by SET_ORDERTYPE
+	// ordertype is known as tif  with IB
+
+	json_object_object_add(order, "orderType", json_object_new_string((limit >.0) ? "LMT" : "MKT"));
+	if (limit > .0) {
+		json_object_object_add(order, "price", json_object_new_double(limit));
+	}
+	json_object_object_add(order, "side", json_object_new_string((amo < 0) ? "SELL" : "BUY"));
+	switch (G.OrderType) {
+		// OrderType IOC Immediate Or Cancel  // AON  All Or None ( no partial fills) and no wait
+		// AON - Flag is not available on API
+	case 1: json_object_object_add(order, "tif", json_object_new_string("FOK")); break;
+		// OrderType GTC (order may wait, partially fills are ok)
+	case 2: json_object_object_add(order, "tif", json_object_new_string("GTC")); break;
+		// OrderType FOK = GTC + AON (wait and complete)
+		// not available in API, use GTC
+	case 3: json_object_object_add(order, "tif", json_object_new_string("GTC")); break;
+		// OrderType DAY
+	case 4: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
+		// OrderType OPG // Market on Open
+	case 5: json_object_object_add(order, "tif", json_object_new_string("OPG")); break;
+		// OrderType CLS // Market on Close
+		// not available in API
+	case 6: 
+		// not set, we use IOC, but not
+	default: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
+	}
+	json_object_object_add(order, "quantity", json_object_new_int(labs(amo)));
+
+	json_object_array_add(jord_arr, order);
+	json_object_object_add(jord, "orders", jord_arr);
+
+	// showMsg("buy request: ", json_object_to_json_string(jord));
+	return jord;
+}
+
+/*
+* called we we want to order some lots of a symbol.
+* 
+* return 0 if order was rejected or not filled within wait time (SET_WAIT)
+* Trade-ID if the order was filled
+* 
+* WHEN OrderType is FillOrKill or IOC then the order has to be cancelled by the plugin if necessary.
+* 
+*/
+DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, double* pPrice, int* pFill)
 {
 	int conId = getContractIdForSymbol(symb);
 	if (conId <= 0) {
@@ -343,43 +386,86 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, doubl
 	}
 	char *suburl = strf("/iserver/account/%s/orders", G.AccountId); 
 
-	// check ordertype which is set by SET_ORDERTYPE
-	// ordertype is known as tif  with IB
-
 	// create the json object for the order
-	json_object* jord = json_object_new_object();
-	json_object* jord_arr = json_object_new_array();
-
-	json_object* order = json_object_new_object();
-
-	json_object_object_add(order, "conid", json_object_new_int(conId));
-	json_object_object_add(order, "orderType", json_object_new_string((limit >.0) ? "LMT" : "MKT"));
-	if (limit > .0) {
-		json_object_object_add(order, "price", json_object_new_double(limit));
-	}
-	json_object_object_add(order, "side",json_object_new_string((amo < 0) ? "SELL" : "BUY"));
-	json_object_object_add(order, "tif", json_object_new_string("GTC"));
-	json_object_object_add(order, "quantity", json_object_new_int(labs(amo)));
-
-	json_object_array_add(jord_arr, order);
-	json_object_object_add(jord, "orders", jord_arr);
-
-	// showMsg("buy request: ", json_object_to_json_string(jord));
+	json_object* jord = create_json_order_payload(conId, limit, amo, stopDist);
 
 	struct json_object* jreq = send(suburl, json_object_to_json_string(jord));
 	json_object_put(jord);
 
-	// showMsg("buy response: ", resp);
-
-	// do we get a question back??
-	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
-		return 0;
+	if (!jreq) goto send_error;
+	
+	json_object* error_obj = json_object_object_get(jreq, "error");
+	if (error_obj) {
+		showMsg("Cannot execute order:", json_object_get_string(error_obj));
+		goto send_error;
 	}
 
+	// probably we are asked some questions..
+	if (!order_question_answer_loop(jreq)) goto send_error;
+
+	// now we have a real order-reply
+	// sanity-check to be shure
+	if (!jreq) goto send_error;
+
+	// order was accepted
+	json_object* first_reply = json_object_array_get_idx(jreq, 0);
+	json_object* order_id_obj = json_object_object_get(first_reply, "order_id"); // DIFF "key" to docs from IB
+	json_object* order_status_obj = json_object_object_get(first_reply, "order_status");
+	const char* order_status = json_object_get_string(order_status_obj);
+
+	if (!strcmp(order_status, "submitted")) {
+		// strange things happen
+		showMsg("Cannot submit order:", order_status);
+		goto send_error;
+	}
+
+	int order_id = json_object_get_int(order_id_obj);
+
+	// Order is now submitted. No lets check for the orderState and fill
+	suburl = strf("/iserver/account/order/status/%d", order_id);
+	int wait = G.WaitTime / 1000; // check every second
+	bool not_complete = true;
+	int cum_fill = 0;
+	double avg_price = 0.;
+	while (not_complete && --wait > 0) {
+		jreq = send(suburl);
+		if (!jreq) goto send_error;
+		// printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(jreq, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
+		json_object* ccp_status_obj = json_object_object_get(jreq, "order_ccp_status");
+		not_complete = strcmp(json_object_get_string(ccp_status_obj), "2");
+		cum_fill = json_object_get_int(json_object_object_get(jreq, "cum_fill"));
+		avg_price = json_object_get_double(json_object_object_get(jreq, "average_price"));
+		Sleep(500); // sleep half a second
+		if (!BrokerProgress(1)) break;
+	}
+
+	if (not_complete) {
+		// check orderType if we should cancel the order..
+		// for now: don't cancel, always wait
+		showMsg("Order not completly filled. Still open.", strf("filled %d of %d", cum_fill, amo));
+		// return 0 in case of IOC or FOK
+	}
+
+	if (pPrice) *pPrice = avg_price;
+	if (pFill) *pFill = cum_fill;
+
+	json_object_put(jreq);
+	return order_id;
+
+send_error:
+	json_object_put(jreq);
+	return 0;
+
+}
+
+int order_question_answer_loop(json_object*& jreq)
+{
 	// question-answer-loop
+	// do we get a question back??
 	struct json_object* reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
 	while (reply_id_obj) {
-		char *suburl = strf("/iserver/reply/%s", json_object_get_string(reply_id_obj));
+		// answer all questions with "yes"
+		char* suburl = strf("/iserver/reply/%s", json_object_get_string(reply_id_obj));
 		json_object_put(jreq); // free the old reply-question
 		jreq = send(suburl, "{\"confirmed\":true}");
 		if (!jreq || !json_object_is_type(jreq, json_type_array)) {
@@ -388,27 +474,12 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double StopDist, double limit, doubl
 		}
 		reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
 	}
-
-	// now we have a real order-reply
-	// sanity-check to be shure
-	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
-		json_object_put(jreq);
-		return 0;
-	}
-	struct json_object* first_reply = json_object_array_get_idx(jreq, 0);
-	struct json_object* order_id_obj = json_object_object_get(first_reply, "order_id"); // DIFF "key" to docs from IB
-	struct json_object* order_status_obj = json_object_object_get(first_reply, "order_status");
-
-	// showMsg("order status ", json_object_get_string(order_status_obj));
-	int order_id = json_object_get_int(order_id_obj);
-	// showMsg("order id ", strf("%d", order_id));
-	json_object_put(jreq);
-	return order_id;
+	return 1;
 }
 
 DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double* pdMarginVal)
 {
-	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.AccountId); // the account we selected during login or the given one
+	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.AccountId); 
 
 	struct json_object* jreq = send(suburl); 
 	if (!jreq) {
@@ -439,7 +510,13 @@ DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double
 	return 1;
 }
 
-
+/*
+* gets called when we want to have historical data from our broker.
+* if we need more than 300 ticks (which are bars, not ticks)
+* then this method gets called a multiple times with different tEnd-Date
+* 
+* return 0 is something is wrong, number of bars otherwise
+*/
 DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes, int nTicks, T6* ticks)
 {
 	int conId = getContractIdForSymbol(symb);
@@ -455,7 +532,10 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		sprintf(durParam, "%dh", (nTickMinutes * nTicks) / 60 ); // we need hours
 	} else if (nTickMinutes <= 1440) { // less then a day per tick
 		sprintf(barParam, "%dh", nTickMinutes / 60);  // we need hours
-		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / 60 / 24); // we need days
+		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / (60 * 24)); // we need days
+	} else { // at least a day per tick. We should check for complete bar-intervals and reject..
+		sprintf(barParam, "%dd", nTickMinutes / (60 * 24));  // we need days
+		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / (60 * 24)); // we need days
 	}
 	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s", 
 		conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd));
@@ -515,6 +595,7 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case GET_COMPLIANCE: return 2.; // no hedging
 	case GET_MAXREQUESTS: return 10.; // max 10 req/s
 	case SET_ORDERTYPE: return G.OrderType = parameter;
+	case SET_WAIT: return G.WaitTime = parameter;
 	case SET_SYMBOL: strcpy_s(G.Symbol, (char*)parameter); return 1.;
 	case GET_TRADES: return getTrades((TRADE*) parameter);
 	}

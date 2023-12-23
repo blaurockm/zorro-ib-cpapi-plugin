@@ -161,6 +161,7 @@
     <ClCompile Include="ib-cpapi.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ib-cpapi.h" />
     <ClInclude Include="uthash.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
