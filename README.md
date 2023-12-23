@@ -11,13 +11,13 @@ Login into client portal on https://localhost:5000/.
 Accept insecure connection or provide a valid certificate. 
 Username & password in Zorro are not used. 
 Interactive Brokers requires an authentication once a day. 
-Automatic (re-)authentication with reduced security of you account can be achieved with https://github.com/Voyz/ibeam
+Automatic (re-)authentication with reduced security of your account can be achieved with https://github.com/Voyz/ibeam
 
 ### Trading limitations
 
 you have one session for all active Zorro-Instances. 
 That means: all your scripts shared the limitation of 10 market-data-requests per second. All scripts running with this plugin cannot 
-than 5 assets with minute-bar-data.
+have more than 5 assets with minute-bar-data in total.
 
 ## Compiling the plugin
 
