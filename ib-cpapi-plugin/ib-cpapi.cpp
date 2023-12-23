@@ -9,7 +9,6 @@ typedef double DATE;
 #include <zorro.h>
 #include <time.h> // for uman readable epoch time
 
-#include "json-c/json.h"
 #include "uthash.h"
 #include "ib-cpapi.h"
 
@@ -17,110 +16,18 @@ typedef double DATE;
 #define PLUGIN_NAME "IB ClientPortal API"
 
 
-#define BASEURL "https://localhost:5000/v1/api"
+// we save all our info from Zorro here..
+Global G;
 
-// Methods from zorro
-int(__cdecl* BrokerMessage)(const char* Text);
-int(__cdecl* BrokerProgress)(const int Progress);
-
-
-struct GLOBAL {
-	int Diag;
-	int PriceType, VolType, OrderType;
-	double Unit;
-	char Url[256]; // send URL buffer
-	char Key[256], Secret[256]; // credentials
-	char Symbol[64], Uuid[256]; // last trade, symbol and Uuid
-	char AccountId[16]; // account-identifier
-	int loggedIn;
-	int WaitTime; // time in ms
-} G; // parameter singleton
-
-struct ib_asset {
-	char symbol[128];  // extended symbol from Zorro
-	int contract_id;
-	char subscr[24];
-	char root[42];   // symbol from broker
-	char secType[15]; // requested security type
-	UT_hash_handle hh;
-};
-
-struct ib_asset* IB_Asset = NULL;
-
-void showMsg(const char* text, const char* detail = NULL)
-{
-	if (!BrokerMessage) return;
-	if (!detail) detail = "";
-	static char msg[1024];
-	sprintf_s(msg, "%s %s", text, detail);
-	BrokerMessage(msg);
-}
-
-int sleep(int ms)
-{
-	Sleep(ms);
-	return BrokerProgress(0);
-}
-
-DATE convertTime2DATE(__time32_t t32)
-{
-	return (double)t32 / (24. * 60. * 60.) + 25569.; // 25569. = DATE(1.1.1970 00:00)
-}
-
-DATE convertEpoch2DATE(long long t32)
-{
-	return (double)t32 / (24. * 60. * 60. * 1000.) + 25569.; // 25569. = DATE(1.1.1970 00:00)
-}
-
-__time32_t convertDATE2Time(DATE date)
-{
-	return (__time32_t)((date - 25569.) * 24. * 60. * 60.);
-}
-/**
- simple send method with error handling.
- chan is for selecting the max return buffer size., must be (1,0) or 2
-*/
-struct json_object* send(const char* suburl, const char* bod = NULL, const char* meth = NULL)
-{
-	// a place for the final url and the respone from the server
-	static char url[1024], resp[1024 * 2024], header[2048];
-	// wait 30 seconds for the server to reply
-	int size = 0, wait = 3000;
-	sprintf_s(url, "%s%s", BASEURL, suburl);
-	strcpy_s(header, "Content-Type: application/json\n");
-	strcpy_s(header, "User-Agent: Console\n"); // without this we get 403
-	// if we add accept-Type then we cannot POST json-body 
-	// method is only used when body is given. otherwise its always GET
-	int reqId = http_request(url, bod, header, (bod ? (meth ? meth :  "POST") : NULL));
-	if (!reqId) {
-		G.loggedIn = 0; // no connection to our gateway
-		goto send_error;
-	}
-	while (!(size = http_status(reqId)) && --wait > 0) {
-		if (!sleep(10)) goto send_error;
-	}
-	if (!size) goto send_error;
-	if (!http_result(reqId, resp, sizeof(resp))) goto send_error;
-	resp[sizeof(resp) - 1] = 0; // prevent buffer overrun
-	http_free(reqId);
-	if (strlen(resp) < 5 || !strncmp(resp, "ERROR", 5)) {
-		showMsg("error with request ", strcatf(resp, suburl));
-		return NULL;
-	}
-	return json_tokener_parse(resp);
-		
-send_error:
-	if (reqId) http_free(reqId);
-	return NULL;
-}
+// the current Asset from IB, taken from Hashmap
+ib_asset* IB_Asset = NULL;
 
 /*
 *  initilize our plugin. when it is loaded by zorro
 */
 DLLFUNC int BrokerOpen(char* Name, FARPROC fpMessage, FARPROC fpProgress) {
 	strcpy_s(Name, 32, PLUGIN_NAME);
-	(FARPROC&)BrokerMessage = fpMessage;
-	(FARPROC&)BrokerProgress = fpProgress;
+	registerCallbacks(fpMessage, fpProgress);
 	// erase everything in our global storage
 	memset(&G, 0, sizeof(G));
 	// we could make an unsubscribe to marketdata here, but this wouzld kill all other running zorros..
@@ -161,122 +68,6 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 DLLFUNC int BrokerTime(DATE* pTimeGMT)
 {
 	return G.loggedIn;
-}
-
-/*
-*  security search by (extended-)symbol
-*
-* find the contract-Id for the given symbol.
-* take care for the secType!
-*
-* extended symbol is multi-in-one-string to search for:
-
-Quote:
-> An extended symbol is a text string in the format Source:Root-Type-Exchange-Currency ("IB:AAPL-STK-SMART-USD").
-> Assets with an expiration date, such as futures, have the format Root-Type-Expiry-Class-Exchange-Currency ("SPY-FUT-20231218-SPY1C-GLOBEX-USD").
-> Stock or index options have the format Root-Type-Expiry-Strike-P/C-Exchange-Currency ("AAPL-OPT-20191218-1350.0-C-GLOBEX-USD").
-> Future options have the format Root-Type-Expiry-Strike-P/C-Class-Exchange.("ZS-FOP-20191218-900.0-C-OSD-ECBOT").
-> Currencies across multiple brokers or exchanges have the format Currency/Countercurrency-Exchange ("NOK/USD-ISLAND").
-
-* For now we use Root and Type
-* TODO: Exchange and Currency
-* Ignoring: Source
-* 
-* Side-effect: create and allocates an ib_asset if found
-*/
-struct ib_asset* searchContractIdForSymbol(char* ext_symbol)
-{
-	char suburl[1024];
-	// split symbol with "-"
-	// 
-
-	struct ib_asset* res;
-	res = (struct ib_asset*)malloc(sizeof * res);
-	if (!res) {
-		showMsg("serious malloc failure, have to exit Zorro");
-		exit(errno);
-	}
-	strcpy(res->symbol, ext_symbol); // our key for the hashmap
-	res->contract_id = 0; // marker if found
-
-	// TODO: split extended symbol
-	const char * root = "XAUUSD";
-	const char * type = "CFD";
-	sprintf_s(suburl, "/iserver/secdef/search?symbol=%s", root);
-
-	// we get a lot of json back.
-
-	struct json_object* jreq = send(suburl);
-	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
-		json_object_put(jreq);
-		return NULL;
-	}
-
-	// search inside the json for secType, which we got from parsing the symbol
-	// loop over the array we get back
-	for (unsigned int i = 0; i < json_object_array_length(jreq); i++)
-	{
-		struct json_object* contract = json_object_array_get_idx(jreq, i);
-
-		struct json_object* con_id_backup = json_object_object_get(contract, "conid");
-		int conid = json_object_get_int(con_id_backup);
-
-		struct json_object* sections = json_object_object_get(contract, "sections");
-		// here we have to search the sections for our type
-		for (unsigned int j = 0; j < json_object_array_length(sections); j++) {
-			struct json_object* section = json_object_array_get_idx(sections, j);
-
-			struct json_object* secType = json_object_object_get(section, "secType");
-			if (!strcmp(type, json_object_get_string(secType))) {
-				// we found our contract.
-				res->contract_id = conid;
-				// does it heave a different conId?
-				struct json_object* con_id_alt = json_object_object_get(section, "conid");
-				if (con_id_alt) 
-					res->contract_id = json_object_get_int(con_id_alt);
-				// done with this symbol.
-				break;
-			}
-		}
-		// found?
-		if (res->contract_id)
-			break;
-	}
-	json_object_put(jreq);
-
-	return res;
-}
-
-/*
-* get the IB-contract id of the asset from IB
-* 
-* we always need this.
-* We expect this to be initialized by the first calls of subscribe to Asset
-* from Broker_Asset2.
-* 
-* Keep the contractId in a hashtable for easier lookup.
-* 
-* return 0 if the symbol is not known to IB, 
-* the contractID otherwise.
-* 
-*/
-int getContractIdForSymbol(char* ext_symbol)
-{
-	if (!ext_symbol)
-		return 0; // disable trading for null - symbol
-
-	struct ib_asset* ass = NULL;
-
-	HASH_FIND_STR(IB_Asset, ext_symbol, ass);
-
-	if (!ass) {
-		ass = searchContractIdForSymbol(ext_symbol);
-		if (!ass || !ass->contract_id)
-			return 0;
-		HASH_ADD_STR(IB_Asset, symbol, ass);
-	}
-
-	return ass->contract_id;
 }
 
 
@@ -324,49 +115,6 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 	return 1;
 }
 
-json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist)
-{
-	json_object* jord = json_object_new_object();
-	json_object* jord_arr = json_object_new_array();
-
-	json_object* order = json_object_new_object();
-
-	json_object_object_add(order, "conid", json_object_new_int(conId));
-	// check ordertype which is set by SET_ORDERTYPE
-	// ordertype is known as tif  with IB
-
-	json_object_object_add(order, "orderType", json_object_new_string((limit >.0) ? "LMT" : "MKT"));
-	if (limit > .0) {
-		json_object_object_add(order, "price", json_object_new_double(limit));
-	}
-	json_object_object_add(order, "side", json_object_new_string((amo < 0) ? "SELL" : "BUY"));
-	switch (G.OrderType) {
-		// OrderType IOC Immediate Or Cancel  // AON  All Or None ( no partial fills) and no wait
-		// AON - Flag is not available on API
-	case 1: json_object_object_add(order, "tif", json_object_new_string("FOK")); break;
-		// OrderType GTC (order may wait, partially fills are ok)
-	case 2: json_object_object_add(order, "tif", json_object_new_string("GTC")); break;
-		// OrderType FOK = GTC + AON (wait and complete)
-		// not available in API, use GTC
-	case 3: json_object_object_add(order, "tif", json_object_new_string("GTC")); break;
-		// OrderType DAY
-	case 4: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
-		// OrderType OPG // Market on Open
-	case 5: json_object_object_add(order, "tif", json_object_new_string("OPG")); break;
-		// OrderType CLS // Market on Close
-		// not available in API
-	case 6: 
-		// not set, we use IOC, but not
-	default: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
-	}
-	json_object_object_add(order, "quantity", json_object_new_int(labs(amo)));
-
-	json_object_array_add(jord_arr, order);
-	json_object_object_add(jord, "orders", jord_arr);
-
-	// showMsg("buy request: ", json_object_to_json_string(jord));
-	return jord;
-}
 
 /*
 * called we we want to order some lots of a symbol.
@@ -435,8 +183,7 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 		not_complete = strcmp(json_object_get_string(ccp_status_obj), "2");
 		cum_fill = json_object_get_int(json_object_object_get(jreq, "cum_fill"));
 		avg_price = json_object_get_double(json_object_object_get(jreq, "average_price"));
-		Sleep(500); // sleep half a second
-		if (!BrokerProgress(1)) break;
+		if (!sleep(500, 1)) break;
 	}
 
 	if (not_complete) {
@@ -458,25 +205,11 @@ send_error:
 
 }
 
-int order_question_answer_loop(json_object*& jreq)
-{
-	// question-answer-loop
-	// do we get a question back??
-	struct json_object* reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
-	while (reply_id_obj) {
-		// answer all questions with "yes"
-		char* suburl = strf("/iserver/reply/%s", json_object_get_string(reply_id_obj));
-		json_object_put(jreq); // free the old reply-question
-		jreq = send(suburl, "{\"confirmed\":true}");
-		if (!jreq || !json_object_is_type(jreq, json_type_array)) {
-			json_object_put(jreq);
-			return 0;
-		}
-		reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
-	}
-	return 1;
-}
-
+/*
+*  Get the overall state of our portfolio
+* 
+*  return 0 if we haveno infos about balance and tradeVolume
+*/
 DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double* pdMarginVal)
 {
 	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.AccountId); 
@@ -568,27 +301,39 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 	return points;
 }
 
-
-#ifdef BROKERTRADE
+/*
+* returning the order fill state for any given (open, partially filled) order
+* called when the price moves. maybe it was filled then.
+* 
+*/
 DLLFUNC int BrokerTrade(int nTradeID, double* pOpen, double* pClose, double* pCost, double* pProfit)
 {
-	if (gOrderType == 0)
-		return gAmount;
-	else // GTC order - stay partially filled forever
-		return gAmount;
-}
-#endif
+	// Order is now submitted. No lets check for the orderState and fill
+	char *suburl = strf("/iserver/account/order/status/%d", nTradeID);
 
-/**
-* ask the broker for all trades from the given account.
-* fills them to the given array
+	int cum_fill = 0;
+	double avg_price = 0.;
+
+	json_object* jreq = send(suburl);
+	if (!jreq) {
+		json_object_put(jreq);
+		return NAY;
+	}
+
+	// printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(jreq, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
+
+	cum_fill = json_object_get_int(json_object_object_get(jreq, "cum_fill"));
+	avg_price = json_object_get_double(json_object_object_get(jreq, "average_price"));
+
+	if (pOpen) *pOpen = avg_price;
+
+	return cum_fill;
+}
+
+/*
+*  for communication with our plugin.
+*  mostly the infos will be stored in G
 */
-int getTrades(TRADE* trades)
-{
-	return 0;
-}
-
-
 DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 {
 	switch (command) {
@@ -596,8 +341,222 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case GET_MAXREQUESTS: return 10.; // max 10 req/s
 	case SET_ORDERTYPE: return G.OrderType = parameter;
 	case SET_WAIT: return G.WaitTime = parameter;
-	case SET_SYMBOL: strcpy_s(G.Symbol, (char*)parameter); return 1.;
-	case GET_TRADES: return getTrades((TRADE*) parameter);
+	case GET_ACCOUNT: strcpy((char*)parameter, G.AccountId); return 1;
+	case SET_SYMBOL: strcpy_s(G.Symbol, (char*)parameter); return 1.; // TODO
+	case GET_TRADES: return getTrades((TRADE*) parameter); // missing infos
 	}
 	return 0.;
+}
+
+////////////////////////////////////////////////////////////////////////
+//
+//   Helper functions
+//
+////////////////////////////////////////////////////////////////////////
+
+
+/**
+* ask the broker for all trades from the given account.
+* fills them to the given array
+*/
+int getTrades(TRADE* trades)
+{
+	char* suburl = strf("/iserver/account/orders");
+
+	// we get a lot of json back.
+	json_object* jreq = send(suburl);
+	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
+		json_object_put(jreq);
+		return 0;
+	}
+	json_object* orders = json_object_object_get(jreq, "orders");
+	for (unsigned int i = 0; i < json_object_array_length(orders); i++)
+	{
+		// hmm, we don't have all this information..
+		//TRADE[i].
+	}
+	return 0;
+}
+
+/*
+* sometime the broker asks us silly question. We will answer yes to all of them.
+*/
+int order_question_answer_loop(json_object*& jreq)
+{
+	// question-answer-loop
+	// do we get a question back??
+	json_object* reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
+	while (reply_id_obj) {
+		// answer all questions with "yes"
+		char* suburl = strf("/iserver/reply/%s", json_object_get_string(reply_id_obj));
+		json_object_put(jreq); // free the old reply-question
+		jreq = send(suburl, "{\"confirmed\":true}");
+		if (!jreq || !json_object_is_type(jreq, json_type_array)) {
+			json_object_put(jreq);
+			return 0;
+		}
+		reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
+	}
+	return 1;
+}
+
+/*
+* create a json-doc for placing an order
+*/
+json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist)
+{
+	json_object* jord = json_object_new_object();
+	json_object* jord_arr = json_object_new_array();
+
+	json_object* order = json_object_new_object();
+
+	json_object_object_add(order, "conid", json_object_new_int(conId));
+	// check ordertype which is set by SET_ORDERTYPE
+	// ordertype is known as tif  with IB
+
+	json_object_object_add(order, "orderType", json_object_new_string((limit > .0) ? "LMT" : "MKT"));
+	if (limit > .0) {
+		json_object_object_add(order, "price", json_object_new_double(limit));
+	}
+	json_object_object_add(order, "side", json_object_new_string((amo < 0) ? "SELL" : "BUY"));
+	switch (G.OrderType) {
+		// OrderType IOC Immediate Or Cancel  // AON  All Or None ( no partial fills) and no wait
+		// AON - Flag is not available on API
+	case 1: json_object_object_add(order, "tif", json_object_new_string("FOK")); break;
+		// OrderType GTC (order may wait, partially fills are ok)
+	case 2: json_object_object_add(order, "tif", json_object_new_string("GTC")); break;
+		// OrderType FOK = GTC + AON (wait and complete)
+		// not available in API, use GTC
+	case 3: json_object_object_add(order, "tif", json_object_new_string("GTC")); break;
+		// OrderType DAY
+	case 4: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
+		// OrderType OPG // Market on Open
+	case 5: json_object_object_add(order, "tif", json_object_new_string("OPG")); break;
+		// OrderType CLS // Market on Close
+		// not available in API
+	case 6:
+		// not set, we use IOC, but not
+	default: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
+	}
+	json_object_object_add(order, "quantity", json_object_new_int(labs(amo)));
+
+	json_object_array_add(jord_arr, order);
+	json_object_object_add(jord, "orders", jord_arr);
+
+	// showMsg("buy request: ", json_object_to_json_string(jord));
+	return jord;
+}
+
+/*
+*  security search by (extended-)symbol
+*
+* find the contract-Id for the given symbol.
+* take care for the secType!
+*
+* extended symbol is multi-in-one-string to search for:
+
+Quote:
+> An extended symbol is a text string in the format Source:Root-Type-Exchange-Currency ("IB:AAPL-STK-SMART-USD").
+> Assets with an expiration date, such as futures, have the format Root-Type-Expiry-Class-Exchange-Currency ("SPY-FUT-20231218-SPY1C-GLOBEX-USD").
+> Stock or index options have the format Root-Type-Expiry-Strike-P/C-Exchange-Currency ("AAPL-OPT-20191218-1350.0-C-GLOBEX-USD").
+> Future options have the format Root-Type-Expiry-Strike-P/C-Class-Exchange.("ZS-FOP-20191218-900.0-C-OSD-ECBOT").
+> Currencies across multiple brokers or exchanges have the format Currency/Countercurrency-Exchange ("NOK/USD-ISLAND").
+
+* For now we use Root and Type
+* TODO: Exchange and Currency
+* Ignoring: Source
+*
+* Side-effect: create and allocates an ib_asset if found
+*/
+ib_asset* searchContractIdForSymbol(char* ext_symbol)
+{
+	// split symbol with "-"
+	// 
+	ib_asset* res;
+	res = (ib_asset*)malloc(sizeof * res);
+	if (!res) {
+		showMsg("serious malloc failure, have to exit Zorro");
+		exit(errno);
+	}
+	strcpy(res->symbol, ext_symbol); // our key for the hashmap
+	res->contract_id = 0; // marker if found
+
+	// TODO: split extended symbol
+	const char* root = "XAUUSD";
+	const char* type = "CFD";
+	char *suburl = strf("/iserver/secdef/search?symbol=%s", root);
+
+	// we get a lot of json back.
+
+	json_object* jreq = send(suburl);
+	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
+		json_object_put(jreq);
+		return NULL;
+	}
+
+	// search inside the json for secType, which we got from parsing the symbol
+	// loop over the array we get back
+	for (unsigned int i = 0; i < json_object_array_length(jreq); i++)
+	{
+		json_object* contract = json_object_array_get_idx(jreq, i);
+
+		json_object* con_id_backup = json_object_object_get(contract, "conid");
+		int conid = json_object_get_int(con_id_backup);
+
+		json_object* sections = json_object_object_get(contract, "sections");
+		// here we have to search the sections for our type
+		for (unsigned int j = 0; j < json_object_array_length(sections); j++) {
+			json_object* section = json_object_array_get_idx(sections, j);
+
+			json_object* secType = json_object_object_get(section, "secType");
+			if (!strcmp(type, json_object_get_string(secType))) {
+				// we found our contract.
+				res->contract_id = conid;
+				// does it heave a different conId?
+				json_object* con_id_alt = json_object_object_get(section, "conid");
+				if (con_id_alt)
+					res->contract_id = json_object_get_int(con_id_alt);
+				// done with this symbol.
+				break;
+			}
+		}
+		// found?
+		if (res->contract_id)
+			break;
+	}
+	json_object_put(jreq);
+
+	return res;
+}
+
+/*
+* get the IB-contract id of the asset from IB
+*
+* we always need this.
+* We expect this to be initialized by the first calls of subscribe to Asset
+* from Broker_Asset2.
+*
+* Keep the contractId in a hashtable for easier lookup.
+*
+* return 0 if the symbol is not known to IB,
+* the contractID otherwise.
+*
+*/
+int getContractIdForSymbol(char* ext_symbol)
+{
+	if (!ext_symbol)
+		return 0; // disable trading for null - symbol
+
+	struct ib_asset* ass = NULL;
+
+	HASH_FIND_STR(IB_Asset, ext_symbol, ass);
+
+	if (!ass) {
+		ass = searchContractIdForSymbol(ext_symbol);
+		if (!ass || !ass->contract_id)
+			return 0;
+		HASH_ADD_STR(IB_Asset, symbol, ass);
+	}
+
+	return ass->contract_id;
 }

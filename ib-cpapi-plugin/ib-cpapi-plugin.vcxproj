@@ -159,6 +159,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\..\Zorro\Source\VC++\ZorroDLL.cpp" />
     <ClCompile Include="ib-cpapi.cpp" />
+    <ClCompile Include="utils.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ib-cpapi.h" />

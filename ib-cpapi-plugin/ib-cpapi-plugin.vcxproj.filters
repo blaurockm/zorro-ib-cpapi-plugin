@@ -21,6 +21,9 @@
     <ClCompile Include="..\..\..\..\Zorro\Source\VC++\ZorroDLL.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="utils.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="uthash.h">
