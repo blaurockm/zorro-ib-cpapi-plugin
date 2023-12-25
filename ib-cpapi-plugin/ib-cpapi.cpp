@@ -8,6 +8,7 @@ typedef double DATE;
 #include <stdio.h>
 #include <zorro.h>
 #include <time.h> // for uman readable epoch time
+#include <string.h>
 
 #include "uthash.h"
 #include "ib-cpapi.h"
@@ -42,15 +43,35 @@ DLLFUNC int BrokerOpen(char* Name, FARPROC fpMessage, FARPROC fpProgress) {
 DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 {
 	if (User) {
-		struct json_object* jreq = send("/iserver/accounts");
+		json_object* jreq = send("/iserver/accounts");
 		if (!jreq) {
 			return 0;
 		}
-		struct json_object* selAcc = json_object_object_get(jreq, "selectedAccount");
-		strcpy_s(G.AccountId, json_object_get_string(selAcc));
-		showMsg("ClientPortal-API connected to ", G.AccountId);
+		json_object* obj;
+		if (json_object_object_get_ex(jreq, "selectedAccount", &obj))
+			strcpy_s(G.account_id, json_object_get_string(obj));
+
 		G.loggedIn = 2; // see BrokerTime
-		G.WaitTime = 60000; // default Wait Time for Orders (SET_WAIT)
+		G.wait_time = 60000; // default Wait Time for Orders (SET_WAIT)
+		json_object_put(jreq);
+
+		jreq = send("/portfolio/accounts");
+		if (!jreq) {
+			return 0;
+		}
+		json_object* accs = json_object_array_get_idx(jreq, 0);
+
+		if (json_object_object_get_ex(accs, "displayName", &obj))
+			strcpy_s(G.account_name, json_object_get_string(obj));
+
+		if (json_object_object_get_ex(accs, "type", &obj))
+			strcpy_s(G.account_type, json_object_get_string(obj));
+
+		if (json_object_object_get_ex(accs, "currency", &obj))
+			strcpy_s(G.currency, json_object_get_string(obj));
+
+		showMsg("ClientPortal-API connected to ", G.account_name);
+		showMsg(strf("its a %s account in %s", G.account_type, G.currency));
 		json_object_put(jreq);
 		return 1;
 	}
@@ -95,10 +116,10 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 		json_object_put(jreq);
 		return 0;
 	}
-	struct json_object* arrElem = json_object_array_get_idx(jreq, 0);
+	json_object* arrElem = json_object_array_get_idx(jreq, 0);
 
 	// ask-Price
-	struct json_object* field86 = json_object_object_get(arrElem, "86");
+	json_object* field86 = json_object_object_get(arrElem, "86");
 	if (!field86) {
 		json_object_put(jreq);
 		return 1;
@@ -106,7 +127,7 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 	double ask = json_object_get_double(field86);
 
 	// bid-Price
-	struct json_object* field84 = json_object_object_get(arrElem, "84");
+	json_object* field84 = json_object_object_get(arrElem, "84");
 	double bid = json_object_get_double(field86);
 
 	if (pPrice) *pPrice =ask;
@@ -132,7 +153,7 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 		showMsg("symbol not found within IB : ", symb);
 		return 0;
 	}
-	char *suburl = strf("/iserver/account/%s/orders", G.AccountId); 
+	char *suburl = strf("/iserver/account/%s/orders", G.account_id); 
 
 	// create the json object for the order
 	json_object* jord = create_json_order_payload(conId, limit, amo, stopDist);
@@ -171,7 +192,7 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 
 	// Order is now submitted. No lets check for the orderState and fill
 	suburl = strf("/iserver/account/order/status/%d", order_id);
-	int wait = G.WaitTime / 1000; // check every second
+	int wait = G.wait_time / 1000; // check every second
 	bool not_complete = true;
 	int cum_fill = 0;
 	double avg_price = 0.;
@@ -212,7 +233,7 @@ send_error:
 */
 DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double* pdMarginVal)
 {
-	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.AccountId); 
+	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.account_id); 
 
 	struct json_object* jreq = send(suburl); 
 	if (!jreq) {
@@ -272,12 +293,12 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 	}
 	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s", 
 		conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd));
-	struct json_object* jreq = send(suburl);
+	json_object* jreq = send(suburl);
 	if (!jreq) {
 		return 0;
 	}
-	struct json_object* data_arr = json_object_object_get(jreq, "data");
-	//printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(data_arr, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
+	json_object* data_arr = json_object_object_get(jreq, "data");
+	printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(data_arr, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
 
 	for (int i = json_object_array_length(data_arr)-1; i>=0 ; i--)
 	{
@@ -340,8 +361,8 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case GET_COMPLIANCE: return 2.; // no hedging
 	case GET_MAXREQUESTS: return 10.; // max 10 req/s
 	case SET_ORDERTYPE: return G.OrderType = parameter;
-	case SET_WAIT: return G.WaitTime = parameter;
-	case GET_ACCOUNT: strcpy((char*)parameter, G.AccountId); return 1;
+	case SET_WAIT: return G.wait_time = parameter;
+	case GET_ACCOUNT: strcpy((char*)parameter, G.account_id); return 1;
 	case SET_SYMBOL: strcpy_s(G.Symbol, (char*)parameter); return 1.; // TODO
 	case GET_TRADES: return getTrades((TRADE*) parameter); // missing infos
 	}
@@ -470,10 +491,7 @@ Quote:
 */
 ib_asset* searchContractIdForSymbol(char* ext_symbol)
 {
-	// split symbol with "-"
-	// 
-	ib_asset* res;
-	res = (ib_asset*)malloc(sizeof * res);
+	ib_asset*  res = (ib_asset*)calloc(1, sizeof * res);
 	if (!res) {
 		showMsg("serious malloc failure, have to exit Zorro");
 		exit(errno);
@@ -481,10 +499,14 @@ ib_asset* searchContractIdForSymbol(char* ext_symbol)
 	strcpy(res->symbol, ext_symbol); // our key for the hashmap
 	res->contract_id = 0; // marker if found
 
-	// TODO: split extended symbol
-	const char* root = "XAUUSD";
-	const char* type = "CFD";
-	char *suburl = strf("/iserver/secdef/search?symbol=%s", root);
+	zorro_asset za;
+	decompose_zorro_asset(ext_symbol, &za);
+	strcpy(res->root, za.root);
+	if (za.type) strcpy(res->secType, za.type);
+	if (za.exchange) strcpy(res->exchange, za.exchange);
+	if (za.currency) strcpy(res->currency, za.currency);
+
+	char *suburl = strf("/iserver/secdef/search?symbol=%s", za.root);
 
 	// we get a lot of json back.
 
@@ -509,7 +531,7 @@ ib_asset* searchContractIdForSymbol(char* ext_symbol)
 			json_object* section = json_object_array_get_idx(sections, j);
 
 			json_object* secType = json_object_object_get(section, "secType");
-			if (!strcmp(type, json_object_get_string(secType))) {
+			if (!strlen(za.type) || !strcmp(za.type, json_object_get_string(secType))) {
 				// we found our contract.
 				res->contract_id = conid;
 				// does it heave a different conId?
@@ -530,6 +552,46 @@ ib_asset* searchContractIdForSymbol(char* ext_symbol)
 }
 
 /*
+* get some more information from the broker about the given asset.
+* important is pip_cost
+* 
+*/
+void fill_asset_info(ib_asset* asset)
+{
+	if (!asset || !asset->contract_id) return; // nothing to do
+
+	char* suburl = strf("/iserver/contract/%d/info-and-rules", asset->contract_id);
+
+	json_object* jreq = send(suburl);
+	if (!jreq) {
+		json_object_put(jreq);
+		return;
+	}
+	json_object* obj;
+	if (json_object_object_get_ex(jreq, "exchange", &obj)) {
+		strcpy(asset->exchange, json_object_get_string(obj));
+	}
+	if (json_object_object_get_ex(jreq, "currency", &obj)) {
+		strcpy(asset->currency, json_object_get_string(obj));
+	}
+	json_object* rules = json_object_object_get(jreq, "rules");
+	if (json_object_object_get_ex(rules, "sizeIncrement", &obj)) {
+		asset->size_increment = json_object_get_double(obj);
+	}
+	if (json_object_object_get_ex(rules, "increment", &obj)) {
+		asset->increment = json_object_get_double(obj);
+	}
+
+	asset->exchrate = get_exchange_rate(asset->currency);
+
+	// compute pip_cost
+	// = LotAmount * Pip * Exchange-Rate
+	asset->pip_cost = asset->size_increment * asset->increment * asset->exchrate;
+
+	// Market-Hours?
+}
+
+/*
 * get the IB-contract id of the asset from IB
 *
 * we always need this.
@@ -547,14 +609,17 @@ int getContractIdForSymbol(char* ext_symbol)
 	if (!ext_symbol)
 		return 0; // disable trading for null - symbol
 
-	struct ib_asset* ass = NULL;
+	ib_asset* ass = NULL;
 
 	HASH_FIND_STR(IB_Asset, ext_symbol, ass);
 
 	if (!ass) {
 		ass = searchContractIdForSymbol(ext_symbol);
-		if (!ass || !ass->contract_id)
+		if (!ass || !ass->contract_id) {
+			if (ass) free(ass);
 			return 0;
+		}
+		fill_asset_info(ass);
 		HASH_ADD_STR(IB_Asset, symbol, ass);
 	}
 

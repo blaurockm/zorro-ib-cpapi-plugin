@@ -8,7 +8,12 @@ int(__cdecl* BrokerProgress)(const int Progress);
 
 extern Global G;
 
-void registerCallbacks(FARPROC fpMessage, FARPROC fpProgress) {
+// the current Asset from IB, taken from Hashmap
+exchg_rate* EXCHG_Rates = NULL;
+
+
+void registerCallbacks(FARPROC fpMessage, FARPROC fpProgress)
+{
 	(FARPROC&)BrokerMessage = fpMessage;
 	(FARPROC&)BrokerProgress = fpProgress;
 }
@@ -44,8 +49,83 @@ __time32_t convertDATE2Time(DATE date)
 	return (__time32_t)((date - 25569.) * 24. * 60. * 60.);
 }
 
+/*
+* fill the given struct with the info parsed from the asset
+*/
+void decompose_zorro_asset(const char*ext_symbol, zorro_asset* asset)
+{
+	char work[128];
+	strcpy(work, ext_symbol);
+	// TODO: split extended symbol
+	// Source:Root - Type - Exchange - Currency("IB:AAPL-STK-SMART-USD")
+	if (!strtok(work, ":")) {
+		showMsg("Source not supported for assets in this plugin. change config!");
+		exit(-656);
+	}
+	char *tok = strtok(work, "-");  // not reentrant! should lock
+	if (!tok) {
+		strcpy(asset->root, work); // no tokenization needed.
+	} else {
+		strcpy(asset->root, tok);
+		tok = strtok(NULL, "-");
+	}
+	if (tok) {
+		strcpy(asset->type, tok);
+		tok = strtok(NULL, "-");
+	}
+	if (tok) {
+		strcpy(asset->exchange, tok);
+		tok = strtok(NULL, "-");
+	}
+	if (tok) {
+		strcpy(asset->currency, tok);
+	}
+	// root is always filled.
+}
+
+
+/*
+* get the current exchange rate for the given currency.
+* cached
+*/
+double get_exchange_rate(const char* dest_ccy) 
+{
+	if (!dest_ccy || !strlen(G.currency))
+		return 0.; // no exchange for this currency.
+
+	exchg_rate* er = NULL;
+
+	HASH_FIND_STR(EXCHG_Rates, dest_ccy, er);
+
+	if (!er) {
+		er = (exchg_rate*)malloc(sizeof * er);
+		if (!er) {
+			showMsg("serious malloc failure, have to exit Zorro");
+			exit(errno);
+		}
+		strcpy(er->currency, dest_ccy); // our key for the hashmap
+		char* suburl = strf("/iserver/exchangerate?target=%s&source=%s", dest_ccy, G.currency);
+		json_object* jreq = send(suburl);
+		if (!jreq) {
+			json_object_put(jreq);
+			free(er);
+			return 0.;
+		}
+		json_object *rate_obj = json_object_object_get(jreq, "rate");
+		er->rate = 1.; // default value
+		if (rate_obj) {
+			er->rate = json_object_get_double(rate_obj);
+		}
+		json_object_put(jreq);
+		HASH_ADD_STR(EXCHG_Rates, currency, er);
+	}
+
+	return er->rate;
+}
+
+
 /**
- simple send method with error handling.
+ send method with error handling.
  chan is for selecting the max return buffer size., must be (1,0) or 2
 */
 json_object* send(const char* suburl, const char* bod, const char* meth)
