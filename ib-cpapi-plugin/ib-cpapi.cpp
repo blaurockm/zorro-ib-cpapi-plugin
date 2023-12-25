@@ -122,11 +122,27 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 	json_object* obj;
 	json_object* arrElem = json_object_array_get_idx(jreq, 0);
 
+	if (json_object_object_get_ex(arrElem, "6509", &obj)) {  // MarketData Availability
+		if (!strncmp(json_object_get_string(obj), "Z", 1)) {
+			G.logged_in = 1;
+		}
+		if (!strncmp(json_object_get_string(obj), "Y", 1)) {
+			G.logged_in = 1;
+		}
+		if (!strncmp(json_object_get_string(obj), "R", 1)) {
+			G.logged_in = 2;
+		}
+		if (!strncmp(json_object_get_string(obj), "D", 1)) {
+			G.logged_in = 2;
+		}
+	}
+
 	if (json_object_object_get_ex(arrElem, "31", &obj)) {
 		if (!strncmp(json_object_get_string(obj), "C", 1)) {
 			G.logged_in = 1;
 		}
 	}
+
 
 	// ask-Price
 	double ask = 0.;
@@ -304,19 +320,30 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 	char durParam[15];
 	if (nTickMinutes <= 30) {  // less then half an hour per tick
 		sprintf(barParam, "%dmin", nTickMinutes);
-		sprintf(durParam, "%dh", (nTickMinutes * nTicks) / 60 ); // we need hours
-	} else if (nTickMinutes <= 1440) { // less then a day per tick
+		sprintf(durParam, "%dh", (nTickMinutes * nTicks) / 60); // we need hours
+	}
+	else if (nTickMinutes <= 1440) { // less then a day per tick
 		sprintf(barParam, "%dh", nTickMinutes / 60);  // we need hours
 		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / (60 * 24)); // we need days
-	} else { // at least a day per tick. We should check for complete bar-intervals and reject..
+	}
+	else { // at least a day per tick. We should check for complete bar-intervals and reject..
 		sprintf(barParam, "%dd", nTickMinutes / (60 * 24));  // we need days
 		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / (60 * 24)); // we need days
 	}
-	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s", 
-		conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd-1));
-	json_object* jreq = send(suburl);
-	if (!jreq) {
-		return 0;
+	int points = 0;
+	json_object* jreq = NULL;
+	while (points == 0 && tEnd > tStart) {
+		char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s",
+			conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd));
+		jreq = send(suburl);
+		if (!jreq) {
+			return 0;
+		}
+		points = json_object_get_int(json_object_object_get(jreq, "points"));
+		if (points == 0) {
+			json_object_put(jreq);
+			tEnd--;
+		}
 	}
 	json_object* data_arr = json_object_object_get(jreq, "data");
 
@@ -337,7 +364,6 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 		ticks->time = convertEpoch2DATE(val);
 		ticks++;
 	}
-	int points = json_object_get_int(json_object_object_get(jreq, "points"));
 	json_object_put(jreq);
 	return points;
 }
@@ -385,6 +411,7 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case SET_SERVER: strcpy(G.server, (char*)parameter); return 1.; // change localhost
 	case GET_ACCOUNT: strcpy((char*)parameter, G.account_id); return 1;
 	case SET_SYMBOL: strcpy(G.symbol, (char*)parameter); return 1.;
+	case SET_ORDERTEXT: strcpy_s(G.order_text, (char*)parameter); return 1.;
 	case GET_TRADES: return get_trades((TRADE*) parameter); // missing infos
 	case DO_CANCEL: return cancel_trade(parameter); // called with Trade ID
 	}
@@ -502,10 +529,14 @@ json_object* create_json_order_payload(int conId, double limit, int amo, double 
 		// OrderType CLS // Market on Close
 		// not available in API
 	case 6:
-		// not set, we use IOC, but not
+		// not set,we don't want to wait, we use IOC, but not on every asset..
 	default: json_object_object_add(order, "tif", json_object_new_string("DAY")); break;
 	}
 	json_object_object_add(order, "quantity", json_object_new_int(labs(amo)));
+
+	if (strlen(G.order_text)) {
+		json_object_object_add(order, "referrer", json_object_new_string(G.order_text));
+	}
 
 	json_object_array_add(jord_arr, order);
 	json_object_object_add(jord, "orders", jord_arr);

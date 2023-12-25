@@ -11,6 +11,7 @@ typedef struct GLOBAL {
 	int PriceType;
 	int volume_type;
 	int order_type; // Flags with GTC, AllOrNothing, FillOrKill
+	char order_text[255]; // SET ORDER_TEXT
 	char symbol[64]; // SET_SYMBOL
 	char server[256];
 	char account_id[16]; // account-identifier

@@ -57,7 +57,16 @@ void decompose_zorro_asset(const char*ext_symbol, zorro_asset* asset)
 	char work[128];
 	strcpy(work, ext_symbol);
 	// TODO: split extended symbol
-	// Source:Root - Type - Exchange - Currency("IB:AAPL-STK-SMART-USD")
+	// Source:Root - Type - Exchange - Currency  for STK, CFD, CMDTY, CASH
+	//  -> ("IB:AAPL-STK-SMART-USD")
+	// Root - Type - Expiry - Class - Exchange - Currency for FUT
+	//  -> ("SPY-FUT-20231218-SPY1C-GLOBEX-USD")
+	// Root - Type - Expiry - Strike - P/C - Exchange - Currency  for OPT
+	//  -> ("AAPL-OPT-20191218-1350.0-C-GLOBEX-USD")
+	// Root - Type - Expiry - Strike - P/C - Class - Exchange for FOP
+	//  -> ("ZS-FOP-20191218-900.0-C-OSD-ECBOT")
+	// P/C means Put or Call
+	// missing Types WAR (warrant) and BOND
 	if (!strtok(work, ":")) {
 		showMsg("Source not supported for assets in this plugin. change config!");
 		exit(-656);
