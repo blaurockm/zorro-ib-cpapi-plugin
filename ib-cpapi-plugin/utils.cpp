@@ -134,6 +134,7 @@ json_object* send(const char* suburl, const char* bod, const char* meth)
 	static char url[1024], resp[1024 * 2024], header[2048];
 	// wait 30 seconds for the server to reply
 	int size = 0, wait = 3000;
+	debug(suburl);
 	sprintf_s(url, "%s%s", BASEURL, suburl);
 	strcpy_s(header, "Content-Type: application/json\n");
 	strcpy_s(header, "User-Agent: Console\n"); // without this we get 403
@@ -150,14 +151,23 @@ json_object* send(const char* suburl, const char* bod, const char* meth)
 	if (!size) goto send_error;
 	if (!http_result(reqId, resp, sizeof(resp))) goto send_error;
 	resp[sizeof(resp) - 1] = 0; // prevent buffer overrun
+	debug(resp);
 	http_free(reqId);
 	if (strlen(resp) < 5 || !strncmp(resp, "ERROR", 5)) {
 		showMsg("error with request ", strcatf(resp, suburl));
 		return NULL;
 	}
-	return json_tokener_parse(resp);
+	json_object* jresp = json_tokener_parse(resp);
+	// debug(json_object_to_json_string_ext(jresp,0)); already done with resp above..
+	return jresp;
 
 send_error:
 	if (reqId) http_free(reqId);
+	debug("no response from API");
 	return NULL;
+}
+
+void debug(const char* msg)
+{
+	if (G.diag) BrokerMessage(msg);
 }

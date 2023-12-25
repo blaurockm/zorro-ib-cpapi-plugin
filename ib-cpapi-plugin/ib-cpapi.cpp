@@ -109,29 +109,33 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 		showMsg("symbol not found within IB : ", symb);
 		return 0;
 	}
-	char* suburl = strf("/iserver/marketdata/snapshot?conids=%d&fields=31,55,86,84", conId);
+	char* fields = "31,55,86,84";
+	if (G.volume_type == 4) {
+		fields = "31,55,86,84,7762";
+	}
+	char* suburl = strf("/iserver/marketdata/snapshot?conids=%d&fields=%s", conId, fields);
 
 	struct json_object* jreq = send(suburl);
 	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
 		json_object_put(jreq);
 		return 0;
 	}
+	json_object* obj;
 	json_object* arrElem = json_object_array_get_idx(jreq, 0);
 
 	// ask-Price
-	json_object* field86 = json_object_object_get(arrElem, "86");
-	if (!field86) {
-		json_object_put(jreq);
-		return 1;
+	double ask = 0.;
+	if (json_object_object_get_ex(arrElem, "86", &obj) && pPrice) {
+		ask = json_object_get_double(obj);
+		*pPrice = ask;
 	}
-	double ask = json_object_get_double(field86);
+	if (json_object_object_get_ex(arrElem, "84", &obj) && pSpread) {
+		*pSpread = ask- json_object_get_double(obj);
+	}
+	if (G.volume_type == 4 && json_object_object_get_ex(arrElem, "7762", &obj) && pVolume) {
+		*pVolume = json_object_get_double(obj);
+	}
 
-	// bid-Price
-	json_object* field84 = json_object_object_get(arrElem, "84");
-	double bid = json_object_get_double(field86);
-
-	if (pPrice) *pPrice =ask;
-	if (pSpread) *pSpread = ask-bid;
 	json_object_put(jreq);
 	return 1;
 }
@@ -209,9 +213,15 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 
 	if (not_complete) {
 		// check orderType if we should cancel the order..
-		// for now: don't cancel, always wait
-		showMsg("Order not completly filled. Still open.", strf("filled %d of %d", cum_fill, amo));
-		// return 0 in case of IOC or FOK
+		if (G.order_type & 2 || G.order_type == 0) {
+			showMsg("Order not completly filled. Will wait.");
+		}
+		else {
+			debug(strf("ordertype %d", G.order_type));
+			showMsg("Order not completly filled. Don't wait. Cancelling order");
+			cancel_trade(order_id);
+			return 0;
+		}
 	}
 
 	if (pPrice) *pPrice = avg_price;
@@ -235,21 +245,21 @@ DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double
 {
 	char *suburl = strf("/portfolio/%s/ledger", g ? g : G.account_id); 
 
-	struct json_object* jreq = send(suburl); 
+	json_object* jreq = send(suburl); 
 	if (!jreq) {
 		return 0;
 	}
-	struct json_object* baseLedger = json_object_object_get(jreq, "BASE");
+	json_object* baseLedger = json_object_object_get(jreq, "BASE");
 
 	// ask-Price
-	struct json_object* balance = json_object_object_get(baseLedger, "cashbalance");
+	json_object* balance = json_object_object_get(baseLedger, "cashbalance");
 	if (!balance) {
 		json_object_put(jreq);
 		showMsg("no balance in response", suburl);
 		return 0;
 	}
 	double bal = json_object_get_double(balance);
-	struct json_object* networth = json_object_object_get(baseLedger, "netliquidationvalue");
+	json_object* networth = json_object_object_get(baseLedger, "netliquidationvalue");
 	if (!networth) {
 		json_object_put(jreq);
 		showMsg("no networth in response", suburl);
@@ -278,7 +288,7 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		showMsg("symbol not found within IB : ", symb);
 		return 0;
 	}
-	showMsg("history2: ", strf("%s - %s\n", strdate(YMDHMS, tStart), strdate("%Y%m%d %H:%M:%S", tEnd)));
+	debug(strf("History 2%s - %s\n", strdate(YMDHMS, tStart), strdate("%Y%m%d %H:%M:%S", tEnd)));
 	char barParam[15];
 	char durParam[15];
 	if (nTickMinutes <= 30) {  // less then half an hour per tick
@@ -292,13 +302,12 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / (60 * 24)); // we need days
 	}
 	char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s", 
-		conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd));
+		conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd-1));
 	json_object* jreq = send(suburl);
 	if (!jreq) {
 		return 0;
 	}
 	json_object* data_arr = json_object_object_get(jreq, "data");
-	printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(data_arr, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
 
 	for (int i = json_object_array_length(data_arr)-1; i>=0 ; i--)
 	{
@@ -308,12 +317,12 @@ DLLFUNC int BrokerHistory2(char* symb, DATE tStart, DATE tEnd, int nTickMinutes,
 		ticks->fClose = (float) json_object_get_double(json_object_object_get(data, "c"));
 		ticks->fHigh = (float) json_object_get_double(json_object_object_get(data, "h")); 
 		ticks->fLow = (float) json_object_get_double(json_object_object_get(data, "l")); 
+		if (G.volume_type == 4) {
+			ticks->fVol = (float)json_object_get_double(json_object_object_get(data, "v"));
+		}
 		const time_t val = json_object_get_int64(json_object_object_get(data, "t"));
 		const time_t val2 = val / 1000ull;
-//		printf(strf("%llu -> %f, %s", val,
-//			convertEpoch2DATE(val),
-//			ctime(&val2)
-//			));
+//		printf(strf("%llu -> %f, %s", val, convertEpoch2DATE(val),	ctime(&val2) ));
 		ticks->time = convertEpoch2DATE(val);
 		ticks++;
 	}
@@ -341,8 +350,6 @@ DLLFUNC int BrokerTrade(int nTradeID, double* pOpen, double* pClose, double* pCo
 		return NAY;
 	}
 
-	// printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(jreq, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
-
 	cum_fill = json_object_get_int(json_object_object_get(jreq, "cum_fill"));
 	avg_price = json_object_get_double(json_object_object_get(jreq, "average_price"));
 
@@ -360,11 +367,15 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	switch (command) {
 	case GET_COMPLIANCE: return 2.; // no hedging
 	case GET_MAXREQUESTS: return 10.; // max 10 req/s
-	case SET_ORDERTYPE: return G.OrderType = parameter;
+	case SET_ORDERTYPE: return G.order_type = parameter;
+	case SET_DIAGNOSTICS: G.diag = parameter; return 1;
 	case SET_WAIT: return G.wait_time = parameter;
+	case SET_VOLTYPE: G.volume_type = parameter; return (parameter == 4);
+	case SET_SERVER: strcpy(G.server, (char*)parameter); return 1.; // change localhost
 	case GET_ACCOUNT: strcpy((char*)parameter, G.account_id); return 1;
-	case SET_SYMBOL: strcpy_s(G.Symbol, (char*)parameter); return 1.; // TODO
-	case GET_TRADES: return getTrades((TRADE*) parameter); // missing infos
+	case SET_SYMBOL: strcpy(G.symbol, (char*)parameter); return 1.;
+	case GET_TRADES: return get_trades((TRADE*) parameter); // missing infos
+	case DO_CANCEL: return cancel_trade(parameter); // called with Trade ID
 	}
 	return 0.;
 }
@@ -375,12 +386,36 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 //
 ////////////////////////////////////////////////////////////////////////
 
+int cancel_trade(int trade_id)
+{
+	if (!trade_id) {
+		showMsg("cancelling of all trades not supported yet!");
+		return 0;
+	}
+	char* suburl = strf("/iserver/account/%s/order/%d", G.account_id, trade_id);
+
+	json_object* jreq = send(suburl, NULL, "DELETE");
+	if (!jreq) {
+		json_object_put(jreq);
+		return 0;
+	}
+
+	json_object* obj;
+	if (json_object_object_get_ex(jreq, "error", &obj)) {
+		showMsg("cannot delete order", json_object_get_string(obj));
+		json_object_put(jreq);
+		return 0;
+	}
+
+	json_object_put(jreq);
+	return 1;
+}
 
 /**
 * ask the broker for all trades from the given account.
 * fills them to the given array
 */
-int getTrades(TRADE* trades)
+int get_trades(TRADE* trades)
 {
 	char* suburl = strf("/iserver/account/orders");
 
@@ -440,7 +475,7 @@ json_object* create_json_order_payload(int conId, double limit, int amo, double 
 		json_object_object_add(order, "price", json_object_new_double(limit));
 	}
 	json_object_object_add(order, "side", json_object_new_string((amo < 0) ? "SELL" : "BUY"));
-	switch (G.OrderType) {
+	switch (G.order_type) {
 		// OrderType IOC Immediate Or Cancel  // AON  All Or None ( no partial fills) and no wait
 		// AON - Flag is not available on API
 	case 1: json_object_object_add(order, "tif", json_object_new_string("FOK")); break;

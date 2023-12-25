@@ -7,10 +7,12 @@
 
 
 typedef struct GLOBAL {
+	int diag; // should be bool
 	int PriceType;
-	int VolType;
-	int OrderType; // Flags with GTC, AllOrNothing, FillOrKill
-	char Symbol[64]; // last trade
+	int volume_type;
+	int order_type; // Flags with GTC, AllOrNothing, FillOrKill
+	char symbol[64]; // SET_SYMBOL
+	char server[256];
 	char account_id[16]; // account-identifier
 	char account_name[50]; // account Description
 	char account_type[16]; // Type of Account
@@ -68,16 +70,20 @@ __time32_t convertDATE2Time(DATE date);
 
 void decompose_zorro_asset(const char* ext_symbol, zorro_asset* asset);
 
-double get_exchange_rate(const char* dest_ccy);
-
 json_object* send(const char* suburl, const char* bod = NULL, const char* meth = NULL);
+
+void debug(const char* msg);
 
 // broker - business methods
 
-int getTrades(TRADE* trades);
+int cancel_trade(int trade_id);
+
+int get_trades(TRADE* trades);
 
 int order_question_answer_loop(json_object*& jreq);
 
 json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist);
 
 int getContractIdForSymbol(char* ext_symbol);
+
+double get_exchange_rate(const char* dest_ccy);
