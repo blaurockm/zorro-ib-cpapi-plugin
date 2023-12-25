@@ -17,7 +17,7 @@ typedef struct GLOBAL {
 	char account_name[50]; // account Description
 	char account_type[16]; // Type of Account
 	char currency[10]; // the currency the account is based on
-	int loggedIn; // reseted after connection-failure.
+	int logged_in; // reseted after connection-failure.
 	int wait_time; // time in ms
 } Global; 
 

@@ -64,7 +64,7 @@ void decompose_zorro_asset(const char*ext_symbol, zorro_asset* asset)
 	}
 	char *tok = strtok(work, "-");  // not reentrant! should lock
 	if (!tok) {
-		strcpy(asset->root, work); // no tokenization needed.
+		strcpy(asset->root, work); // no tokenization needed at all.
 	} else {
 		strcpy(asset->root, tok);
 		tok = strtok(NULL, "-");
@@ -142,7 +142,7 @@ json_object* send(const char* suburl, const char* bod, const char* meth)
 	// method is only used when body is given. otherwise its always GET
 	int reqId = http_request(url, bod, header, (bod ? (meth ? meth : "POST") : NULL));
 	if (!reqId) {
-		G.loggedIn = 0; // no connection to our gateway
+		G.logged_in = 0; // no connection to our gateway
 		goto send_error;
 	}
 	while (!(size = http_status(reqId)) && --wait > 0) {
