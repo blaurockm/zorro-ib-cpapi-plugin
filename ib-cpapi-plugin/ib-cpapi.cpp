@@ -15,6 +15,8 @@ typedef double DATE;
 
 #define PLUGIN_TYPE 2
 #define PLUGIN_NAME "IB ClientPortal API"
+#define PLUGIN_VERSION "1.0"
+#define CPAPI_VERSION "2023-12-14"
 
 
 // we save all our info from Zorro here..
@@ -70,8 +72,9 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 		if (json_object_object_get_ex(accs, "currency", &obj))
 			strcpy_s(G.currency, json_object_get_string(obj));
 
-		showMsg("ClientPortal-API connected to ", G.account_name);
+		showMsg("ClientPortal-API connected to Account ", G.account_name);
 		showMsg(strf("its a %s account in %s", G.account_type, G.currency));
+		showMsg(strf("Plugin version %s, API-Version %s", PLUGIN_VERSION, CPAPI_VERSION));
 		json_object_put(jreq);
 		return 1;
 	}
@@ -81,7 +84,7 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 /*
 *  check Connection to ClientPortal
 *  0 = Lost, 1 = market closed, 2 = ok and market open
-* -> market time depends on Asset!?
+* -> market time depends on Asset? -> market time depends on Exchange!
 *  
 * for now: only check if we have a connection to our gateway.
 * no extra checking for time
@@ -277,23 +280,26 @@ DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double
 	if (!jreq) {
 		return 0;
 	}
+	// we want everything in the same base-currency
 	json_object* baseLedger = json_object_object_get(jreq, "BASE");
+	json_object* obj;
 
-	// ask-Price
-	json_object* balance = json_object_object_get(baseLedger, "cashbalance");
-	if (!balance) {
+	double bal = 0.;
+	double net = 0.;
+	if (json_object_object_get_ex(baseLedger, "cashbalance", &obj)) {
+		bal = json_object_get_double(obj);
+	} else {
 		json_object_put(jreq);
 		showMsg("no balance in response", suburl);
 		return 0;
 	}
-	double bal = json_object_get_double(balance);
-	json_object* networth = json_object_object_get(baseLedger, "netliquidationvalue");
-	if (!networth) {
+	if (json_object_object_get_ex(baseLedger, "netliquidationvalue", &obj)) {
+		net = json_object_get_double(obj);
+	} else {
 		json_object_put(jreq);
 		showMsg("no networth in response", suburl);
 		return 0;
 	}
-	double net = json_object_get_double(networth);
 
 	if (pdBalance) *pdBalance = bal ;
 	if (pdTradeVal) *pdTradeVal = net - bal;
@@ -322,7 +328,7 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 		sprintf(barParam, "%dmin", nTickMinutes);
 		sprintf(durParam, "%dh", (nTickMinutes * nTicks) / 60); // we need hours
 	}
-	else if (nTickMinutes <= 1440) { // less then a day per tick
+	else if (nTickMinutes < 1440) { // less then a day per tick
 		sprintf(barParam, "%dh", nTickMinutes / 60);  // we need hours
 		sprintf(durParam, "%dd", (nTickMinutes * nTicks) / (60 * 24)); // we need days
 	}
@@ -332,6 +338,7 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 	}
 	int points = 0;
 	json_object* jreq = NULL;
+	json_object* obj;
 	while (points == 0 && tEnd > tStart) {
 		char* suburl = strf("/iserver/marketdata/history?conid=%d&bar=%s&period=%s&startTime=%s",
 			conId, barParam, durParam, strdate("%Y%m%d-%H:%M:%S", tEnd));
@@ -339,29 +346,42 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 		if (!jreq) {
 			return 0;
 		}
-		points = json_object_get_int(json_object_object_get(jreq, "points"));
+		if(json_object_object_get_ex(jreq, "points", &obj))
+			points = json_object_get_int(obj);
 		if (points == 0) {
+			showMsg("skipping end-date");
 			json_object_put(jreq);
 			tEnd--;
 		}
 	}
 	json_object* data_arr = json_object_object_get(jreq, "data");
 
-	for (int i = json_object_array_length(data_arr)-1; i>=0 ; i--)
+	for (int i = json_object_array_length(data_arr) - 1; i >= 0; i--)
 	{
-		struct json_object* data = json_object_array_get_idx(data_arr, i); 
+		json_object* data = json_object_array_get_idx(data_arr, i);
 
-		ticks->fOpen = (float) json_object_get_double(json_object_object_get(data,"o"));
-		ticks->fClose = (float) json_object_get_double(json_object_object_get(data, "c"));
-		ticks->fHigh = (float) json_object_get_double(json_object_object_get(data, "h")); 
-		ticks->fLow = (float) json_object_get_double(json_object_object_get(data, "l")); 
-		if (G.volume_type == 4) {
-			ticks->fVol = (float)json_object_get_double(json_object_object_get(data, "v"));
+		if (json_object_object_get_ex(data, "o", &obj))
+			ticks->fOpen = (float)json_object_get_double(obj);
+		if (json_object_object_get_ex(data, "c", &obj))
+			ticks->fClose = (float)json_object_get_double(obj);
+		if (json_object_object_get_ex(data, "h", &obj))
+			ticks->fHigh = (float)json_object_get_double(obj);
+		if (json_object_object_get_ex(data, "l", &obj))
+			ticks->fLow = (float)json_object_get_double(obj);
+		if (G.volume_type == 4 && json_object_object_get_ex(data, "v", &obj)) {
+			ticks->fVol = (float)json_object_get_double(obj);
 		}
-		const time_t val = json_object_get_int64(json_object_object_get(data, "t"));
-		const time_t val2 = val / 1000ull;
-//		printf(strf("%llu -> %f, %s", val, convertEpoch2DATE(val),	ctime(&val2) ));
-		ticks->time = convertEpoch2DATE(val);
+		if (json_object_object_get_ex(data, "t", &obj)) {
+			const time_t val = json_object_get_int64(obj);
+			ticks->time = convertEpoch2DATE(val);
+			// const time_t val2 = val / 1000ull;
+			// printf(strf("%llu -> %f, %s", val, convertEpoch2DATE(val),	ctime(&val2) ));
+		}
+		else {
+			showMsg("strange history-replay, no time included, stopping!", json_object_to_json_string_ext(data, 0));
+			json_object_put(jreq);
+			return 0;
+		}
 		ticks++;
 	}
 	json_object_put(jreq);
@@ -387,8 +407,14 @@ DLLFUNC int BrokerTrade(int nTradeID, double* pOpen, double* pClose, double* pCo
 		return NAY;
 	}
 
-	cum_fill = json_object_get_int(json_object_object_get(jreq, "cum_fill"));
-	avg_price = json_object_get_double(json_object_object_get(jreq, "average_price"));
+	json_object* obj;
+
+	if (json_object_object_get_ex(jreq, "cum_fill", &obj)) {
+		cum_fill = json_object_get_int(obj);
+	}
+	if (json_object_object_get_ex(jreq, "average_price", &obj)) {
+		avg_price = json_object_get_double(obj);
+	}
 
 	if (pOpen) *pOpen = avg_price;
 
@@ -414,6 +440,8 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case SET_ORDERTEXT: strcpy_s(G.order_text, (char*)parameter); return 1.;
 	case GET_TRADES: return get_trades((TRADE*) parameter); // missing infos
 	case DO_CANCEL: return cancel_trade(parameter); // called with Trade ID
+	case GET_POSITION: return 0; // TODO
+	case SET_COMBO_LEGS: return 0; // TODO
 	}
 	return 0.;
 }

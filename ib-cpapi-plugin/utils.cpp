@@ -113,7 +113,7 @@ double get_exchange_rate(const char* dest_ccy)
 			exit(errno);
 		}
 		strcpy(er->currency, dest_ccy); // our key for the hashmap
-		char* suburl = strf("/iserver/exchangerate?target=%s&source=%s", dest_ccy, G.currency);
+		char* suburl = strf("/iserver/exchangerate?target=%s&source=%s", G.currency, dest_ccy);
 		json_object* jreq = send(suburl);
 		if (!jreq) {
 			json_object_put(jreq);
@@ -126,6 +126,7 @@ double get_exchange_rate(const char* dest_ccy)
 			er->rate = json_object_get_double(rate_obj);
 		}
 		json_object_put(jreq);
+		showMsg(strf("one %s costs %f %s", dest_ccy, er->rate, G.currency));
 		HASH_ADD_STR(EXCHG_Rates, currency, er);
 	}
 
