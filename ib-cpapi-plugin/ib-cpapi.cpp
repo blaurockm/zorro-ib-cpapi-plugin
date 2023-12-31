@@ -193,7 +193,7 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 	// create the json object for the order
 	json_object* jord = create_json_order_payload(conId, limit, amo, stopDist);
 
-	struct json_object* jreq = send(suburl, json_object_to_json_string(jord));
+	json_object* jreq = send(suburl, json_object_to_json_string(jord));
 	json_object_put(jord);
 
 	if (!jreq) goto send_error;
@@ -205,7 +205,7 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 	}
 
 	// probably we are asked some questions..
-	if (!order_question_answer_loop(jreq)) goto send_error;
+	if (!order_question_answer_loop(&jreq)) goto send_error;
 
 	// now we have a real order-reply
 	// sanity-check to be shure
@@ -395,30 +395,13 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 */
 DLLFUNC int BrokerTrade(int nTradeID, double* pOpen, double* pClose, double* pCost, double* pProfit)
 {
-	// Order is now submitted. No lets check for the orderState and fill
-	char *suburl = strf("/iserver/account/order/status/%d", nTradeID);
+	ib_trade ibt;
 
-	int cum_fill = 0;
-	double avg_price = 0.;
+	int ret = fetch_trade(nTradeID, &ibt);
 
-	json_object* jreq = send(suburl);
-	if (!jreq) {
-		json_object_put(jreq);
-		return NAY;
-	}
+	if (pOpen) *pOpen = ibt.avg_price;
 
-	json_object* obj;
-
-	if (json_object_object_get_ex(jreq, "cum_fill", &obj)) {
-		cum_fill = json_object_get_int(obj);
-	}
-	if (json_object_object_get_ex(jreq, "average_price", &obj)) {
-		avg_price = json_object_get_double(obj);
-	}
-
-	if (pOpen) *pOpen = avg_price;
-
-	return cum_fill;
+	return ret;
 }
 
 /*
@@ -438,9 +421,9 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case GET_ACCOUNT: strcpy((char*)parameter, G.account_id); return 1;
 	case SET_SYMBOL: strcpy(G.symbol, (char*)parameter); return 1.;
 	case SET_ORDERTEXT: strcpy_s(G.order_text, (char*)parameter); return 1.;
-	case GET_TRADES: return get_trades((TRADE*) parameter); // missing infos
+	case GET_TRADES: return get_trades((TRADE*) parameter); 
+	case GET_POSITION: return get_position((const char *)parameter); // called with symbol
 	case DO_CANCEL: return cancel_trade(parameter); // called with Trade ID
-	case GET_POSITION: return 0; // TODO
 	case SET_COMBO_LEGS: return 0; // TODO
 	}
 	return 0.;
@@ -451,6 +434,91 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 //   Helper functions
 //
 ////////////////////////////////////////////////////////////////////////
+
+int fetch_trade(int nTradeID, ib_trade *ibt) {
+	// Order is now submitted. No lets check for the orderState and fill
+	char* suburl = strf("/iserver/account/order/status/%d", nTradeID);
+
+	memset(ibt, 0, sizeof(ib_trade));
+
+	ibt->trade_id = nTradeID;
+
+	json_object* jreq = send(suburl);
+	if (!jreq) {
+		json_object_put(jreq);
+		return NAY;
+	}
+
+	json_object* obj;
+
+	if (json_object_object_get_ex(jreq, "conid", &obj)) {
+		ibt->contract_id = json_object_get_int(obj);
+	}
+
+	if (json_object_object_get_ex(jreq, "side", &obj)) {
+		if (strcmp(json_object_get_string(obj), "S")) {
+			ibt->flags = TR_SHORT;
+		}
+	}
+	if (json_object_object_get_ex(jreq, "size", &obj)) {
+		ibt->quantity = json_object_get_int(obj);
+	}
+	if (json_object_object_get_ex(jreq, "cum_fill", &obj)) {
+		ibt->filled = json_object_get_int(obj);
+	}
+	if (json_object_object_get_ex(jreq, "average_price", &obj)) {
+		ibt->avg_price = json_object_get_double(obj);
+	}
+	if (json_object_object_get_ex(jreq, "sec_type", &obj)) {
+		const char* sectype= json_object_get_string(obj);
+		if (strcmp(sectype, "FUT")) {
+
+		}
+		if (strcmp(sectype, "OPT")) {
+
+		}
+		if (strcmp(sectype, "FOP")) {
+
+		}
+	}
+
+	return ibt->filled;
+}
+
+int get_position(const char* symbol) {
+	const char* suburl = "/iserver/account/orders";
+
+	int contract_id = getContractIdForSymbol(symbol);
+	if (contract_id <= 0) {
+		return 0;
+	}
+
+	json_object* jreq = send(suburl);
+	if (!jreq || !json_object_is_type(jreq, json_type_array)) {
+		json_object_put(jreq);
+		return 0;
+	}
+
+	// scan all open orders for our contract-id.
+	json_object* obj;
+	json_object* orders = json_object_object_get(jreq, "orders");
+	int pos_count = json_object_array_length(orders);
+	for (int i = 0; i < pos_count; i++)
+	{
+		if (json_object_object_get_ex(jreq, "conid", &obj)) {
+			if (contract_id == json_object_get_int(obj)) {
+				if (json_object_object_get_ex(jreq, "totalSize", &obj)) {
+					int res = json_object_get_int(obj);
+					json_object_put(jreq);
+					return res;
+				}
+			}
+		}
+	}
+	json_object_put(jreq);
+	return 0;
+}
+
 
 int cancel_trade(int trade_id)
 {
@@ -483,7 +551,8 @@ int cancel_trade(int trade_id)
 */
 int get_trades(TRADE* trades)
 {
-	char* suburl = strf("/iserver/account/orders");
+	const char* suburl = "/iserver/account/orders";
+	ib_trade ibt;
 
 	// we get a lot of json back.
 	json_object* jreq = send(suburl);
@@ -491,33 +560,49 @@ int get_trades(TRADE* trades)
 		json_object_put(jreq);
 		return 0;
 	}
+	json_object* obj;
 	json_object* orders = json_object_object_get(jreq, "orders");
-	for (unsigned int i = 0; i < json_object_array_length(orders); i++)
+	int pos_count = json_object_array_length(orders);
+	for (int i = 0; i < pos_count; i++)
 	{
-		// hmm, we don't have all this information..
-		//TRADE[i].
+		if (json_object_object_get_ex(jreq, "orderId", &obj)) {
+			int trade_id = json_object_get_int(obj);
+			int ret = fetch_trade(trade_id, &ibt);
+			if (ret > 0) {
+				trades[i].nID = trade_id;
+				trades[i].nLots = ibt.quantity;
+				trades[i].flags = ibt.flags;
+				trades[i].fEntryPrice = ibt.avg_price;
+				trades[i].fStrike = ibt.strike;
+				trades[i].tExitDate = ibt.expiryDate;
+				trades[i].nContract = ibt.contractType;
+				strcpy_s(trades[i].sInfo, ibt.info);
+			}
+		}
 	}
-	return 0;
+	json_object_put(jreq);
+
+	return pos_count;
 }
 
 /*
-* sometime the broker asks us silly question. We will answer yes to all of them.
+* sometime the broker asks us silly questions. We will answer yes to all of them.
 */
-int order_question_answer_loop(json_object*& jreq)
+int order_question_answer_loop(json_object** jreq)
 {
 	// question-answer-loop
 	// do we get a question back??
-	json_object* reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
+	json_object* reply_id_obj = json_object_object_get(json_object_array_get_idx(*jreq, 0), "id");
 	while (reply_id_obj) {
 		// answer all questions with "yes"
 		char* suburl = strf("/iserver/reply/%s", json_object_get_string(reply_id_obj));
-		json_object_put(jreq); // free the old reply-question
-		jreq = send(suburl, "{\"confirmed\":true}");
-		if (!jreq || !json_object_is_type(jreq, json_type_array)) {
-			json_object_put(jreq);
+		json_object_put(*jreq); // free the old reply-question
+		*jreq = send(suburl, "{\"confirmed\":true}");
+		if (!*jreq || !json_object_is_type(*jreq, json_type_array)) {
+			json_object_put(*jreq);
 			return 0;
 		}
-		reply_id_obj = json_object_object_get(json_object_array_get_idx(jreq, 0), "id");
+		reply_id_obj = json_object_object_get(json_object_array_get_idx(*jreq, 0), "id");
 	}
 	return 1;
 }
@@ -641,7 +726,7 @@ void searchContractIdForSymbol(ib_asset *ibass)
 
 /*
 * get some more information from the broker about the given asset.
-* important is pip_cost
+* important is pip + pip_cost
 * 
 */
 void fill_asset_info(ib_asset* asset)
@@ -692,7 +777,7 @@ void fill_asset_info(ib_asset* asset)
 * the contractID otherwise.
 *
 */
-int getContractIdForSymbol(char * ext_symbol)
+int getContractIdForSymbol(const char * ext_symbol)
 {
 	if (!ext_symbol)
 		return 0; // disable trading for null - symbol

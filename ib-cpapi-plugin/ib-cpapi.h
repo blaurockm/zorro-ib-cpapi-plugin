@@ -43,6 +43,21 @@ typedef struct ib_asset {
 	UT_hash_handle hh;
 } ib_asset;
 
+typedef struct ib_trade {
+	int trade_id;
+	int contract_id;
+	int quantity;
+	int filled;
+	int flags;  // flags of Zorro (TR_SHORT)
+	double avg_price;
+	// only for FUT, OPT, or FOP:
+	double strike;  
+	double expiryDate; // exitDate in Zorro
+	int contractType; // flags from Zorro (PUT, CALL, FUTURE)
+	char info[128]; // tradingClass
+} ib_trade;
+
+
 typedef struct zorro_asset {
 	char root[32];
 	char type[32];
@@ -77,14 +92,18 @@ void debug(const char* msg);
 
 // broker - business methods
 
+int fetch_trade(int nTradeID, ib_trade* ibt);
+
+int get_position(const char* symbol);
+
 int cancel_trade(int trade_id);
 
 int get_trades(TRADE* trades);
 
-int order_question_answer_loop(json_object*& jreq);
+int order_question_answer_loop(json_object** jreq);
 
 json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist);
 
-int getContractIdForSymbol(char* ext_symbol);
+int getContractIdForSymbol(const char* ext_symbol);
 
 double get_exchange_rate(const char* dest_ccy);
