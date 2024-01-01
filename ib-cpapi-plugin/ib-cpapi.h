@@ -12,7 +12,7 @@ typedef struct GLOBAL {
 	int volume_type;
 	int order_type; // Flags with GTC, AllOrNothing, FillOrKill
 	char order_text[255]; // SET ORDER_TEXT
-	char symbol[64]; // SET_SYMBOL
+	char symbol[128]; // SET_SYMBOL
 	char server[256];
 	char account_id[16]; // account-identifier
 	char account_name[50]; // account Description
@@ -93,6 +93,8 @@ void debug(const char* msg);
 // broker - business methods
 
 int fetch_trade(int nTradeID, ib_trade* ibt);
+
+int get_options(const CONTRACT* contracts);
 
 int get_position(const char* symbol);
 

@@ -122,6 +122,7 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 		json_object_put(jreq);
 		return 0;
 	}
+	strcpy_s(G.symbol, symb); // save symbol for later usage in contracts (SET_SYMBOL)
 	json_object* obj;
 	json_object* arrElem = json_object_array_get_idx(jreq, 0);
 
@@ -423,6 +424,7 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	case SET_ORDERTEXT: strcpy_s(G.order_text, (char*)parameter); return 1.;
 	case GET_TRADES: return get_trades((TRADE*) parameter); 
 	case GET_POSITION: return get_position((const char *)parameter); // called with symbol
+	case GET_OPTIONS: return get_options((CONTRACT*)parameter);
 	case DO_CANCEL: return cancel_trade(parameter); // called with Trade ID
 	case SET_COMBO_LEGS: return 0; // TODO
 	}
@@ -471,19 +473,25 @@ int fetch_trade(int nTradeID, ib_trade *ibt) {
 	}
 	if (json_object_object_get_ex(jreq, "sec_type", &obj)) {
 		const char* sectype= json_object_get_string(obj);
-		if (strcmp(sectype, "FUT")) {
+		if (!strcmp(sectype, "FUT")) {
 
 		}
-		if (strcmp(sectype, "OPT")) {
+		if (!strcmp(sectype, "OPT")) {
 
 		}
-		if (strcmp(sectype, "FOP")) {
+		if (!strcmp(sectype, "FOP")) {
 
 		}
 	}
 
 	return ibt->filled;
 }
+
+int get_options(const CONTRACT* contracts) {
+	// TODO
+	return 0;
+}
+
 
 int get_position(const char* symbol) {
 	const char* suburl = "/iserver/account/orders";

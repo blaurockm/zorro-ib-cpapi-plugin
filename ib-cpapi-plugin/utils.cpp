@@ -82,6 +82,9 @@ void decompose_zorro_asset(const char*ext_symbol, zorro_asset* asset)
 		strcpy(asset->type, tok);
 		tok = strtok(NULL, "-");
 	}
+	if (!strcmp(asset->type, "STK")) {
+
+	}
 	if (tok) {
 		strcpy(asset->exchange, tok);
 		tok = strtok(NULL, "-");
