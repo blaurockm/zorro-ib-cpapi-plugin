@@ -5,6 +5,21 @@
 
 #define BASEURL "https://localhost:5000/v1/api"
 
+// IB-Possible AssetTypes 
+// STK, CFD, OPT, FOP, WAR, FUT, BAG, PDC, CASH, IND, BOND, BILL, FUND, SLB, News, CMDTY, IOPT, ICU, ICS, PHYSS, CRYPTO
+
+#define SUPPORTED_SECTYPES "STKCFDCASH"
+#define SECTYPE_STK "STK"
+#define SECTYPE_CFD "CFD"
+#define SECTYPE_CASH "CASH"
+#define SECTYPE_FUT "FUT"
+#define SECTYPE_OPT "OPT"
+#define SECTYPE_FOP "FOP"
+
+// we know: chart periods
+// "OPT":["2h","1d","2d","1w","1m"],
+// "FOP":["2h","1d","2d","1w","1m"]
+
 
 typedef struct GLOBAL {
 	int diag; // should be bool
@@ -63,6 +78,10 @@ typedef struct zorro_asset {
 	char type[32];
 	char exchange[32];
 	char currency[16];
+	char expiry[10]; // format YYYYMMDD or as contrct symbol
+	char strike[10]; // amount
+	char put_or_call[2]; // P or C
+	char tclass[20]; // trading class
 } zorro_asset;
 
 typedef struct exchg_rate {
@@ -89,6 +108,10 @@ void decompose_zorro_asset(const char* ext_symbol, zorro_asset* asset);
 json_object* send(const char* suburl, const char* bod = NULL, const char* meth = NULL);
 
 void debug(const char* msg);
+
+void debug(json_object* json);
+
+char* urlsanitize(const char* param);
 
 // broker - business methods
 

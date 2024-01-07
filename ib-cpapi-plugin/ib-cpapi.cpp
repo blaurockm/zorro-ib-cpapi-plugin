@@ -15,7 +15,7 @@ typedef double DATE;
 
 #define PLUGIN_TYPE 2
 #define PLUGIN_NAME "IB ClientPortal API"
-#define PLUGIN_VERSION "1.0"
+#define PLUGIN_VERSION "1.1"
 #define CPAPI_VERSION "2023-12-14"
 
 
@@ -50,8 +50,15 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 			return 0;
 		}
 		json_object* obj;
+		const char* server = "";
 		if (json_object_object_get_ex(jreq, "selectedAccount", &obj))
 			strcpy_s(G.account_id, json_object_get_string(obj));
+		if (json_object_object_get_ex(jreq, "serverInfo", &obj)) {
+			json_object* obj2;
+			if (json_object_object_get_ex(obj, "serverVersion", &obj2)) {
+				server = strdup(json_object_get_string(obj2));
+			}
+		}
 
 		G.logged_in = 2; // see BrokerTime
 		G.wait_time = 60000; // default Wait Time for Orders (SET_WAIT)
@@ -75,6 +82,9 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 		showMsg("ClientPortal-API connected to Account ", G.account_name);
 		showMsg(strf("its a %s account in %s", G.account_type, G.currency));
 		showMsg(strf("Plugin version %s, API-Version %s", PLUGIN_VERSION, CPAPI_VERSION));
+		if (server) 
+			showMsg(strf("IB-Server version %s", server));
+
 		json_object_put(jreq);
 		return 1;
 	}
@@ -111,7 +121,7 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 	if (conId <= 0) {
 		return 0;
 	}
-	char* fields = "31,55,86,84";
+	const char* fields = "31,55,86,84";
 	if (G.volume_type == 4) {
 		fields = "31,55,86,84,7762";
 	}
@@ -161,10 +171,12 @@ DLLFUNC int BrokerAsset(char* symb, double* pPrice, double* pSpread,
 		*pVolume = json_object_get_double(obj);
 	}
 	if (pPip) *pPip = IB_Asset->increment;
-	if (pLotAmount) *pLotAmount = IB_Asset->size_increment;
-	if (pPipCost) {
-		*pPipCost = IB_Asset->size_increment * IB_Asset->increment * IB_Asset->exchrate;
-	}
+	// size_increment is almost always wrong. AAPL reports 100 ??? 
+	// most of the time it is 1, for everything. CASH, CFD, STK...
+	// if (pLotAmount) *pLotAmount = IB_Asset->size_increment;
+//	if (pPipCost) {
+//		*pPipCost = IB_Asset->size_increment * IB_Asset->increment * IB_Asset->exchrate;
+//	}
 	// pMargin -> no API for that
 	// pRollLong/Short -> no API for that
 	// pComission -> no API for that
@@ -197,20 +209,30 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 	json_object* jreq = send(suburl, json_object_to_json_string(jord));
 	json_object_put(jord);
 
-	if (!jreq) goto send_error;
+	if (!jreq) {
+		json_object_put(jreq);
+		return 0;
+	}
 	
 	json_object* error_obj = json_object_object_get(jreq, "error");
 	if (error_obj) {
 		showMsg("Cannot execute order:", json_object_get_string(error_obj));
-		goto send_error;
+		json_object_put(jreq);
+		return 0;
 	}
 
 	// probably we are asked some questions..
-	if (!order_question_answer_loop(&jreq)) goto send_error;
+	if (!order_question_answer_loop(&jreq)) {
+		json_object_put(jreq);
+		return 0;
+	}
 
 	// now we have a real order-reply
 	// sanity-check to be shure
-	if (!jreq) goto send_error;
+	if (!jreq) {
+		json_object_put(jreq);
+		return 0;
+	}
 
 	// order was accepted
 	json_object* first_reply = json_object_array_get_idx(jreq, 0);
@@ -220,8 +242,9 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 
 	if (!strcmp(order_status, "submitted")) {
 		// strange things happen
-		showMsg("Cannot submit order:", order_status);
-		goto send_error;
+		showMsg("\nCannot submit order:", order_status);
+		json_object_put(jreq);
+		return 0;
 	}
 
 	int order_id = json_object_get_int(order_id_obj);
@@ -234,7 +257,10 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 	double avg_price = 0.;
 	while (not_complete && --wait > 0) {
 		jreq = send(suburl);
-		if (!jreq) goto send_error;
+		if (!jreq) {
+			json_object_put(jreq);
+			return 0;
+		}
 		// printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(jreq, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
 		json_object* ccp_status_obj = json_object_object_get(jreq, "order_ccp_status");
 		not_complete = strcmp(json_object_get_string(ccp_status_obj), "2");
@@ -246,11 +272,11 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 	if (not_complete) {
 		// check orderType if we should cancel the order..
 		if (G.order_type & 2 || G.order_type == 0) {
-			showMsg("Order not completly filled. Will wait.");
+			showMsg("\nOrder not completly filled. Will wait.");
 		}
 		else {
 			debug(strf("ordertype %d", G.order_type));
-			showMsg("Order not completly filled. Don't wait. Cancelling order");
+			showMsg("\nOrder not completly filled. Don't wait. Cancelling order");
 			cancel_trade(order_id);
 			return 0;
 		}
@@ -261,11 +287,6 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 
 	json_object_put(jreq);
 	return order_id;
-
-send_error:
-	json_object_put(jreq);
-	return 0;
-
 }
 
 /*
@@ -291,14 +312,14 @@ DLLFUNC int BrokerAccount(char* g, double* pdBalance, double* pdTradeVal, double
 		bal = json_object_get_double(obj);
 	} else {
 		json_object_put(jreq);
-		showMsg("no balance in response", suburl);
+		showMsg("\nno balance in response", suburl);
 		return 0;
 	}
 	if (json_object_object_get_ex(baseLedger, "netliquidationvalue", &obj)) {
 		net = json_object_get_double(obj);
 	} else {
 		json_object_put(jreq);
-		showMsg("no networth in response", suburl);
+		showMsg("\nno networth in response", suburl);
 		return 0;
 	}
 
@@ -355,35 +376,37 @@ DLLFUNC int BrokerHistory2(char* ext_symbol, DATE tStart, DATE tEnd, int nTickMi
 			tEnd--;
 		}
 	}
-	json_object* data_arr = json_object_object_get(jreq, "data");
-
-	for (int i = json_object_array_length(data_arr) - 1; i >= 0; i--)
+	json_object* data_arr = NULL;
+	if (json_object_object_get_ex(jreq, "data", &data_arr)) 
 	{
-		json_object* data = json_object_array_get_idx(data_arr, i);
+		for (int i = json_object_array_length(data_arr) - 1; i >= 0; i--)
+		{
+			json_object* data = json_object_array_get_idx(data_arr, i);
 
-		if (json_object_object_get_ex(data, "o", &obj))
-			ticks->fOpen = (float)json_object_get_double(obj);
-		if (json_object_object_get_ex(data, "c", &obj))
-			ticks->fClose = (float)json_object_get_double(obj);
-		if (json_object_object_get_ex(data, "h", &obj))
-			ticks->fHigh = (float)json_object_get_double(obj);
-		if (json_object_object_get_ex(data, "l", &obj))
-			ticks->fLow = (float)json_object_get_double(obj);
-		if (G.volume_type == 4 && json_object_object_get_ex(data, "v", &obj)) {
-			ticks->fVol = (float)json_object_get_double(obj);
+			if (json_object_object_get_ex(data, "o", &obj))
+				ticks->fOpen = (float)json_object_get_double(obj);
+			if (json_object_object_get_ex(data, "c", &obj))
+				ticks->fClose = (float)json_object_get_double(obj);
+			if (json_object_object_get_ex(data, "h", &obj))
+				ticks->fHigh = (float)json_object_get_double(obj);
+			if (json_object_object_get_ex(data, "l", &obj))
+				ticks->fLow = (float)json_object_get_double(obj);
+			if (G.volume_type == 4 && json_object_object_get_ex(data, "v", &obj)) {
+				ticks->fVol = (float)json_object_get_double(obj);
+			}
+			if (json_object_object_get_ex(data, "t", &obj)) {
+				const time_t val = json_object_get_int64(obj);
+				ticks->time = convertEpoch2DATE(val);
+				// const time_t val2 = val / 1000ull;
+				// printf(strf("%llu -> %f, %s", val, convertEpoch2DATE(val),	ctime(&val2) ));
+			}
+			else {
+				showMsg("\nstrange history-reply, no time included, stopping!", json_object_to_json_string_ext(data, 0));
+				json_object_put(jreq);
+				return 0;
+			}
+			ticks++;
 		}
-		if (json_object_object_get_ex(data, "t", &obj)) {
-			const time_t val = json_object_get_int64(obj);
-			ticks->time = convertEpoch2DATE(val);
-			// const time_t val2 = val / 1000ull;
-			// printf(strf("%llu -> %f, %s", val, convertEpoch2DATE(val),	ctime(&val2) ));
-		}
-		else {
-			showMsg("strange history-replay, no time included, stopping!", json_object_to_json_string_ext(data, 0));
-			json_object_put(jreq);
-			return 0;
-		}
-		ticks++;
 	}
 	json_object_put(jreq);
 	return points;
@@ -544,7 +567,7 @@ int cancel_trade(int trade_id)
 
 	json_object* obj;
 	if (json_object_object_get_ex(jreq, "error", &obj)) {
-		showMsg("cannot delete order", json_object_get_string(obj));
+		showMsg("\ncannot delete order", json_object_get_string(obj));
 		json_object_put(jreq);
 		return 0;
 	}
@@ -733,6 +756,45 @@ void searchContractIdForSymbol(ib_asset *ibass)
 }
 
 /*
+* Forex is something special, we have to search for the currency pairs to
+* get the correct contract_id.
+* 7.1.24 Not all currency-pairs are available through the api. eg. USD/EUR is missing ?!?
+*/
+void searchForexContractIdForSymbol(ib_asset* ibass)
+{
+	if (!ibass || strcmp(ibass->secType, SECTYPE_CASH)) return; // nothing to do
+
+	char* suburl = strf("/iserver/currency/pairs?currency=%s", ibass->root);
+
+	// we get a lot of json back.
+
+	json_object* jreq = send(suburl);
+	if (!jreq) {
+		json_object_put(jreq);
+		return;
+	}
+
+	char* searchpair = strf("%s.%s", ibass->root, ibass->currency);
+
+	json_object* pairs = json_object_object_get(jreq, ibass->root);
+	// search inside the json for secType, which we got from parsing the symbol
+	// loop over the array we get back
+	for (unsigned int i = 0; i < json_object_array_length(pairs); i++)
+	{
+		json_object* contract = json_object_array_get_idx(pairs, i);
+
+		json_object* symbol = json_object_object_get(contract, "symbol");
+		const char* pairsymb = json_object_get_string(symbol);
+		if (!strcmp(pairsymb, searchpair)) {
+			json_object* con_id = json_object_object_get(contract, "conid");
+			ibass->contract_id = json_object_get_int(con_id);
+			break;
+		}
+	}
+	json_object_put(jreq);
+}
+
+/*
 * get some more information from the broker about the given asset.
 * important is pip + pip_cost
 * 
@@ -755,13 +817,29 @@ void fill_asset_info(ib_asset* asset)
 	if (json_object_object_get_ex(jreq, "currency", &obj)) {
 		strcpy(asset->currency, json_object_get_string(obj));
 	}
-	json_object* rules = json_object_object_get(jreq, "rules");
-	if (json_object_object_get_ex(rules, "sizeIncrement", &obj)) {
-		asset->size_increment = json_object_get_double(obj);
+
+	if (!strcmp(asset->secType, SECTYPE_CFD) || !strcmp(asset->secType, SECTYPE_CASH))
+	{
+		json_object* rules = json_object_object_get(jreq, "rules");
+		// the value reported by IB is almost always wrong. CFD on Stocks have 100 ??
+		// do not report this, do it manually 
+//		if (json_object_object_get_ex(rules, "sizeIncrement", &obj)) {
+//			asset->size_increment = json_object_get_double(obj);
+//		}
+		if (json_object_object_get_ex(rules, "increment", &obj)) {
+			asset->increment = json_object_get_double(obj);
+		}
 	}
-	if (json_object_object_get_ex(rules, "increment", &obj)) {
-		asset->increment = json_object_get_double(obj);
+
+	if (!strcmp(asset->secType, SECTYPE_STK))
+	{
+		json_object* rules = json_object_object_get(jreq, "rules");
+		asset->size_increment = 1.;  // IB reports 100 for stocks, why? 1 is correct
+		if (json_object_object_get_ex(rules, "increment", &obj)) {
+			asset->increment = json_object_get_double(obj);
+		}
 	}
+
 
 	asset->exchrate = get_exchange_rate(asset->currency);
 
@@ -783,6 +861,8 @@ void fill_asset_info(ib_asset* asset)
 *
 * return 0 if the symbol is not known to IB,
 * the contractID otherwise.
+* 
+* sideeffect: global variable IB_Asset will point to the found asset
 *
 */
 int getContractIdForSymbol(const char * ext_symbol)
@@ -791,6 +871,7 @@ int getContractIdForSymbol(const char * ext_symbol)
 		return 0; // disable trading for null - symbol
 
 	zorro_asset za;
+	memset(&za, 0, sizeof(za));
 	decompose_zorro_asset(ext_symbol, &za);
 
 	ib_asset* ass = NULL;
@@ -803,14 +884,25 @@ int getContractIdForSymbol(const char * ext_symbol)
 			showMsg("serious malloc failure, have to exit Zorro");
 			exit(errno);
 		}
+		if (!strstr(SUPPORTED_SECTYPES, za.type)) {
+			showMsg(strf("\nunsupported security-type %s", za.type));
+			free(ass);
+			return 0;
+		}
+
 		strcpy(ass->symbol, ext_symbol); // our key for the hashmap
 		strcpy(ass->root, za.root); 
 		strcpy(ass->secType, za.type);
 		strcpy(ass->exchange, za.exchange);
 		strcpy(ass->currency, za.currency);
-		searchContractIdForSymbol(ass);
+		if (!strcmp(za.type, SECTYPE_CASH)) {
+			searchForexContractIdForSymbol(ass);
+		}
+		else {
+			searchContractIdForSymbol(ass);
+		}
 		if (!ass->contract_id) {
-			showMsg(strf("no contract for asset %s found.", ext_symbol));
+			showMsg(strf("\nno contract for asset %s found.", ext_symbol));
 			free(ass);
 			return 0;
 		}
