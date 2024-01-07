@@ -50,7 +50,7 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 			return 0;
 		}
 		json_object* obj;
-		const char* server = "";
+		const char* server = NULL;
 		if (json_object_object_get_ex(jreq, "selectedAccount", &obj))
 			strcpy_s(G.account_id, json_object_get_string(obj));
 		if (json_object_object_get_ex(jreq, "serverInfo", &obj)) {
@@ -83,7 +83,7 @@ DLLFUNC int BrokerLogin(char* User, char* Pwd, char* Type, char* g)
 		showMsg(strf("its a %s account in %s", G.account_type, G.currency));
 		showMsg(strf("Plugin version %s, API-Version %s", PLUGIN_VERSION, CPAPI_VERSION));
 		if (server) 
-			showMsg(strf("IB-Server version %s", server));
+			showMsg(strf("IB-Server version %s\n", server));
 
 		json_object_put(jreq);
 		return 1;
@@ -437,7 +437,7 @@ DLLFUNC double BrokerCommand(int command, intptr_t parameter)
 	switch (command) {
 	case GET_COMPLIANCE: return 2.; // no hedging
 	case GET_MAXREQUESTS: return 10.; // max 10 req/s
-	case SET_ORDERTYPE: return G.order_type = parameter;
+	case SET_ORDERTYPE: showMsg(strf("Ordertype = %d", parameter)); return G.order_type = parameter;
 	case SET_DIAGNOSTICS: G.diag = parameter; return 1;
 	case SET_WAIT: return G.wait_time = parameter;
 	case SET_VOLTYPE: G.volume_type = parameter; return (parameter == 4);
@@ -638,26 +638,24 @@ int order_question_answer_loop(json_object** jreq)
 	return 1;
 }
 
-/*
-* create a json-doc for placing an order
-*/
-json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist)
-{
-	json_object* jord = json_object_new_object();
-	json_object* jord_arr = json_object_new_array();
 
+/*
+* create single order element for place Order
+*/
+json_object* create_json_order_element(int conId, double price, int amo, const char *type)
+{
 	json_object* order = json_object_new_object();
 
 	json_object_object_add(order, "conid", json_object_new_int(conId));
-	// check ordertype which is set by SET_ORDERTYPE
-	// ordertype is known as tif  with IB
 
-	json_object_object_add(order, "orderType", json_object_new_string((limit > .0) ? "LMT" : "MKT"));
-	if (limit > .0) {
-		json_object_object_add(order, "price", json_object_new_double(limit));
+	json_object_object_add(order, "orderType", json_object_new_string(type));
+	if (price > .0) {
+		json_object_object_add(order, "price", json_object_new_double(price));
 	}
 	json_object_object_add(order, "side", json_object_new_string((amo < 0) ? "SELL" : "BUY"));
-	switch (G.order_type) {
+	// check order_type which is set by SET_ORDERTYPE
+	// order_type is known as tif  with IB
+	switch (G.order_type & 7) {
 		// OrderType IOC Immediate Or Cancel  // AON  All Or None ( no partial fills) and no wait
 		// AON - Flag is not available on API
 	case 1: json_object_object_add(order, "tif", json_object_new_string("FOK")); break;
@@ -681,8 +679,28 @@ json_object* create_json_order_payload(int conId, double limit, int amo, double 
 	if (strlen(G.order_text)) {
 		json_object_object_add(order, "referrer", json_object_new_string(G.order_text));
 	}
+	return order;
+}
 
+
+/*
+* create a json-doc for placing an order
+*/
+json_object* create_json_order_payload(int conId, double limit, int amo, double stopDist)
+{
+	json_object* jord = json_object_new_object();
+	json_object* jord_arr = json_object_new_array();
+
+	// the first order
+	json_object* order = create_json_order_element(conId, limit, amo, (limit > .0) ? "LMT" : "MKT");
 	json_object_array_add(jord_arr, order);
+
+	// do we need a bracketed stop order ?
+	if (G.order_type & 8 && stopDist > 0.) {
+		json_object* bra_order = create_json_order_element(conId, stopDist, -amo, "STP");
+		json_object_array_add(jord_arr, bra_order);
+	}
+
 	json_object_object_add(jord, "orders", jord_arr);
 	return jord;
 }
