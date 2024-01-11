@@ -15,7 +15,7 @@ typedef double DATE;
 
 #define PLUGIN_TYPE 2
 #define PLUGIN_NAME "IB ClientPortal API"
-#define PLUGIN_VERSION "1.1"
+#define PLUGIN_VERSION "1.2"
 #define CPAPI_VERSION "2023-12-14"
 
 
@@ -252,7 +252,7 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 	// Order is now submitted. No lets check for the orderState and fill
 	suburl = strf("/iserver/account/order/status/%d", order_id);
 	int wait = G.wait_time / 1000; // check every second
-	bool not_complete = true;
+	bool not_complete = true, cannot_cancel_order=false;
 	int cum_fill = 0;
 	double avg_price = 0.;
 	while (not_complete && --wait > 0) {
@@ -261,22 +261,32 @@ DLLFUNC int BrokerBuy2(char* symb, int amo, double stopDist, double limit, doubl
 			json_object_put(jreq);
 			return 0;
 		}
-		// printf("\njobj from str:\n---\n%s\n---\n", json_object_to_json_string_ext(jreq, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY));
-		json_object* ccp_status_obj = json_object_object_get(jreq, "order_ccp_status");
-		not_complete = strcmp(json_object_get_string(ccp_status_obj), "2");
-		cum_fill = json_object_get_int(json_object_object_get(jreq, "cum_fill"));
-		avg_price = json_object_get_double(json_object_object_get(jreq, "average_price"));
+		debug(jreq);
+		json_object* jobj;
+		if (json_object_object_get_ex(jreq, "order_ccp_status", &jobj)) 
+			not_complete = strcmp(json_object_get_string(jobj), "2");
+		if (json_object_object_get_ex(jreq, "cannot_cancel_order", &jobj))
+			cannot_cancel_order = json_object_get_boolean(jobj);
+		if (json_object_object_get_ex(jreq, "cum_fill", &jobj))
+			cum_fill = json_object_get_int(jobj);
+		if (json_object_object_get_ex(jreq, "average_price", &jobj))
+			avg_price = json_object_get_double(jobj);
 		if (!sleep(500, 1)) break;
 	}
 
 	if (not_complete) {
 		// check orderType if we should cancel the order..
-		if (G.order_type & 2 || G.order_type == 0) {
+		/*Hi,
+if the order is not partially (type 0) or completely (type 1) filled, cancel it and return after WAIT_TIME. Only GTC orders are allowed to stay open. Zorro sets the order type with TradeMode.
+Best regards
+Zorro Support Team
+		*/
+		if (G.order_type & 2) {
 			showMsg("\nOrder not completly filled. Will wait.");
 		}
 		else {
 			debug(strf("ordertype %d", G.order_type));
-			showMsg("\nOrder not completly filled. Don't wait. Cancelling order");
+			showMsg("\nOrder not completly filled. Don't wait anymore. Cancelling order.");
 			cancel_trade(order_id);
 			return 0;
 		}
